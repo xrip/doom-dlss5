@@ -20,15 +20,18 @@ typedef struct {
     SceneVertex *vertices;
 } Batch;
 typedef struct {
-    uint32_t asset, shade;
+    uint32_t asset, shade, sector;
     Position position;
-    bool hidden;
+    bool ceiling, fullbright, hidden;
 } Sprite;
 typedef struct { float x, z; } MapPoint;
 typedef struct {
     float floor, ceiling;
     uint32_t special, tag;
+    uint32_t light, floor_asset, ceiling_asset;
 } SceneSector;
+
+typedef struct { Position position; float yaw; uint32_t sector; } Teleport;
 typedef struct {
     MapPoint start, end;
     uint32_t front, back, flags, special, tag;
@@ -56,6 +59,8 @@ typedef struct {
     CollisionTriangle *regions;
     size_t wall_count;
     WallSurface *walls;
+    size_t teleport_count;
+    Teleport *teleports;
 } Scene;
 
 _Noreturn void fail(const char *format, ...);
@@ -73,3 +78,4 @@ void scene_free(Scene *scene);
 void scene_print(const Scene *scene);
 void wall_vertices(const Scene *scene, const WallSurface *wall, SceneVertex vertices[6]);
 float line_distance_squared(const CollisionLine *line, float x, float z);
+uint32_t line_neighbor(const CollisionLine *line, uint32_t sector);

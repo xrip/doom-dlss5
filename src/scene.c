@@ -98,7 +98,7 @@ static void put_float(FILE *file, float value) {
 void scene_write(const Scene *scene, const char *path) {
     FILE *file = fopen(path, "wb");
     if (!file) fail("Cannot create %s", path);
-    put_bytes(file, "DRMAP003", 8);
+    put_bytes(file, "DRMAP005", 8);
     put_bytes(file, scene->map, 8);
     put_u32(file, (uint32_t)scene->asset_count);
     put_u32(file, (uint32_t)scene->batch_count);
@@ -134,6 +134,8 @@ void scene_write(const Scene *scene, const char *path) {
         const Sprite *sprite = &scene->sprites[index];
         put_u32(file, sprite->asset);
         put_u32(file, sprite->shade);
+        put_u32(file, sprite->sector);
+        put_u32(file, (uint32_t)sprite->ceiling | ((uint32_t)sprite->fullbright << 1));
         put_float(file, sprite->position.x);
         put_float(file, sprite->position.y);
         put_float(file, sprite->position.z);
@@ -145,6 +147,7 @@ void scene_write(const Scene *scene, const char *path) {
         const SceneSector *sector = &scene->sectors[index];
         put_float(file, sector->floor); put_float(file, sector->ceiling);
         put_u32(file, sector->special); put_u32(file, sector->tag);
+        put_u32(file, sector->light); put_u32(file, sector->floor_asset); put_u32(file, sector->ceiling_asset);
     }
     for (size_t index = 0; index < scene->line_count; ++index) {
         const CollisionLine *line = &scene->lines[index];
@@ -166,6 +169,12 @@ void scene_write(const Scene *scene, const char *path) {
         put_u32(file, wall->batch); put_u32(file, wall->first); put_u32(file, wall->line);
         put_u32(file, wall->side); put_u32(file, wall->kind); put_u32(file, wall->switch_asset);
         put_float(file, wall->offset_x); put_float(file, wall->offset_y);
+    }
+    put_u32(file, (uint32_t)scene->teleport_count);
+    for (size_t index = 0; index < scene->teleport_count; ++index) {
+        const Teleport *teleport = &scene->teleports[index];
+        put_float(file, teleport->position.x); put_float(file, teleport->position.y); put_float(file, teleport->position.z);
+        put_float(file, teleport->yaw); put_u32(file, teleport->sector);
     }
     if (fclose(file)) fail("Cannot finish scene file");
 }
@@ -206,7 +215,7 @@ Scene scene_read(const char *path) {
     size_t size;
     uint8_t *bytes = read_file(path, &size);
     Reader reader = {bytes, size, 0};
-    if (memcmp(take(&reader, 8), "DRMAP003", 8)) fail("Unsupported scene format; run wad-convert again");
+    if (memcmp(take(&reader, 8), "DRMAP005", 8)) fail("Unsupported scene format; run wad-convert again");
     Scene scene = {0};
     memcpy(scene.map, take(&reader, 8), 8);
     scene.asset_count = get_u32(&reader);
@@ -252,6 +261,10 @@ Scene scene_read(const char *path) {
     for (size_t index = 0; index < scene.sprite_count; ++index) {
         Sprite *sprite = &scene.sprites[index];
         sprite->asset = get_u32(&reader); sprite->shade = get_u32(&reader);
+        sprite->sector = get_u32(&reader);
+        uint32_t flags = get_u32(&reader);
+        if (flags > 3) fail("Invalid sprite flags");
+        sprite->ceiling = (flags & 1) != 0; sprite->fullbright = (flags & 2) != 0;
         if (sprite->asset >= scene.asset_count || sprite->shade > 31) fail("Invalid scene sprite");
         sprite->position = get_position(&reader);
     }
@@ -265,10 +278,15 @@ Scene scene_read(const char *path) {
     scene.sectors = allocate(scene.sector_count, sizeof(SceneSector));
     scene.lines = allocate(scene.line_count, sizeof(CollisionLine));
     scene.regions = allocate(scene.region_count, sizeof(CollisionTriangle));
+    for (size_t index = 0; index < scene.sprite_count; ++index)
+        if (scene.sprites[index].sector >= scene.sector_count) fail("Invalid sprite sector");
     for (size_t index = 0; index < scene.sector_count; ++index) {
         SceneSector *sector = &scene.sectors[index];
         sector->floor = get_float(&reader); sector->ceiling = get_float(&reader);
         sector->special = get_u32(&reader); sector->tag = get_u32(&reader);
+        sector->light = get_u32(&reader); sector->floor_asset = get_u32(&reader); sector->ceiling_asset = get_u32(&reader);
+        if (sector->light > 255 || sector->floor_asset >= scene.asset_count ||
+            (sector->ceiling_asset != UINT32_MAX && sector->ceiling_asset >= scene.asset_count)) fail("Invalid sector material");
         if (sector->floor > sector->ceiling) fail("Invalid collision sector heights");
     }
     for (size_t index = 0; index < scene.line_count; ++index) {
@@ -315,6 +333,14 @@ Scene scene_read(const char *path) {
         if (wall->first > batch->count || batch->count - wall->first < 6 ||
             (wall->side ? line->back : line->front) == UINT32_MAX) fail("Invalid wall surface range");
     }
+    scene.teleport_count = get_u32(&reader);
+    if (scene.teleport_count > 65536) fail("Too many teleport destinations");
+    scene.teleports = allocate(scene.teleport_count, sizeof(Teleport));
+    for (size_t index = 0; index < scene.teleport_count; ++index) {
+        Teleport *teleport = &scene.teleports[index];
+        teleport->position = get_position(&reader); teleport->yaw = get_float(&reader); teleport->sector = get_u32(&reader);
+        if (teleport->sector >= scene.sector_count) fail("Invalid teleport sector");
+    }
     if (reader.offset != reader.size) fail("Unexpected trailing scene data");
     free(bytes);
     return scene;
@@ -325,7 +351,7 @@ void scene_free(Scene *scene) {
     for (size_t index = 0; index < scene->batch_count; ++index) free(scene->batches[index].vertices);
     free(scene->assets); free(scene->batches); free(scene->sprites);
     free(scene->sectors); free(scene->lines); free(scene->regions);
-    free(scene->walls);
+    free(scene->walls); free(scene->teleports);
     *scene = (Scene){0};
 }
 

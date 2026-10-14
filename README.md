@@ -46,7 +46,7 @@ ctest --test-dir build --output-on-failure
 
 WASD walks; mouse turns the view. Walls block motion and allow sliding.
 The player goes up steps of at most 24 Doom units and falls to lower floors.
-Left Shift runs. E / Space uses doors and door switches. Left click activates
+Left Shift runs. E / Space uses doors, floor switches, and lifts. Left click activates
 gun-trigger doors. Touch cards or skull keys to unlock doors of that color.
 The colored squares show held keys. Tab frees or takes the mouse; R goes back
 to the player-one start. Escape closes the window. There is no jump.
@@ -57,6 +57,9 @@ mode; `--overview` also uses noclip.
 
 Movement has 35 Hz acceleration/friction, distinct walk/run/strafe speeds,
 view bob, step smoothing, and 90-degree horizontal FOV. Walking has no mouse pitch.
+The HUD shows health and found secrets. Sector hazards can kill the player;
+R returns to the start with fresh health. An exit shows the map result;
+Enter loads the next prepared map and its music from the same folder.
 
 ## Any Doom II level
 
@@ -101,7 +104,7 @@ gaps caused by rounded classic BSP splits. BSP is used only in the
 converter to find the floor height and light at thing positions. Original
 open-outline sectors use original BSP regions instead of guessed closing edges.
 
-The viewer uploads prepared meshes and index textures once. Doors update
+The viewer uploads prepared meshes and index textures once. Doors and floors update
 affected mesh buffers, including texture pegging and UV motion. Each pixel
 gets its color from an original PLAYPAL/COLORMAP lookup table. Transparent
 patch gaps have their own alpha mask: palette index zero remains a valid
@@ -114,15 +117,19 @@ The converter also exports sector heights, flat collision regions, and
 linedef adjacency, flags, specials, and tags. Collision checks use live
 sector heights: a closed door blocks the player until its opening is tall
 enough. Closed sectors keep their collision footprint in the prepared file.
-See [MOVEMENT.md](docs/MOVEMENT.md) for movement and supported door actions.
+See [MOVEMENT.md](docs/MOVEMENT.md) for movement and supported sector actions.
 
-Normal/fast doors, keys, switches, walk-over/gun triggers, and door timers
-work. There are no enemies in motion, collisions with sprites, non-key
+Door, floor, stair, platform, crusher, light, teleport, scrolling-wall, and
+exit actions used by the original MAP01..MAP32 are handled. Secret sectors
+and hazardous floors are active. See [INTERACTION.md](docs/INTERACTION.md)
+for the action inventory, MAP01 secret links, and simulation limits.
+There are no enemies in motion, collisions with sprites, non-key
 pickups, weapon view, sound effects, light animation, texture animation,
 or sprite angle/frame selection. Sky projection and the choice of light
 table row are approximations; this is not a pixel-exact Doom renderer.
-Lifts, moving floors, teleports, boss progression, and exits/level transitions
-remain unimplemented. Debug noclip lets you explore past them.
+Monster-only triggers and boss-death progression need combat/AI and remain
+unimplemented. Debug noclip lets you explore past them. This does not claim
+full game or demo parity; item pickups and combat remain a separate task.
 
 See [FORMAT.md](docs/FORMAT.md) for the scene format and
 [PROVENANCE.md](docs/PROVENANCE.md) for implementation sources.

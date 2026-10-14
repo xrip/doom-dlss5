@@ -2,6 +2,11 @@
 
 #include <math.h>
 
+uint32_t line_neighbor(const CollisionLine *line, uint32_t sector) {
+    uint32_t other = line->front == sector ? line->back : line->back == sector ? line->front : UINT32_MAX;
+    return other != sector ? other : UINT32_MAX;
+}
+
 void wall_vertices(const Scene *scene, const WallSurface *wall, SceneVertex vertices[6]) {
     const CollisionLine *line = &scene->lines[wall->line];
     uint32_t own = wall->side ? line->back : line->front;

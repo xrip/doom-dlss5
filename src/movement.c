@@ -31,7 +31,7 @@ uint32_t scene_sector_at(const Scene *scene, float x, float z, uint32_t hint) {
 }
 
 Player player_spawn(const Scene *scene) {
-    Player player = {.feet = scene->spawn, .view_height = PLAYER_EYE};
+    Player player = {.feet = scene->spawn, .view_height = PLAYER_EYE, .health = 100};
     player.sector = scene_sector_at(scene, player.feet.x, player.feet.z, UINT32_MAX);
     if (player.sector == UINT32_MAX) fail("Player start outside collision regions");
     const SceneSector *sector = &scene->sectors[player.sector];
@@ -105,7 +105,7 @@ static void slide(const Scene *scene, Player *player, float dx, float dz) {
     }
 }
 
-static void clearance(const Scene *scene, const Player *player, float *floor, float *ceiling) {
+void player_clearance(const Scene *scene, const Player *player, float *floor, float *ceiling) {
     *floor = scene->sectors[player->sector].floor;
     *ceiling = scene->sectors[player->sector].ceiling;
     for (size_t index = 0; index < scene->line_count; ++index) {
@@ -118,9 +118,20 @@ static void clearance(const Scene *scene, const Player *player, float *floor, fl
     }
 }
 
+bool player_touches_sector(const Scene *scene, const Player *player, uint32_t sector) {
+    if (!player) return false;
+    if (player->sector == sector) return true;
+    for (size_t index = 0; index < scene->line_count; ++index) {
+        const CollisionLine *line = &scene->lines[index];
+        if (line_neighbor(line, player->sector) != sector) continue;
+        if (line_distance_squared(line, player->feet.x, player->feet.z) <= PLAYER_RADIUS * PLAYER_RADIUS) return true;
+    }
+    return false;
+}
+
 static void settle(const Scene *scene, Player *player, float seconds) {
     float floor, ceiling;
-    clearance(scene, player, &floor, &ceiling);
+    player_clearance(scene, player, &floor, &ceiling);
     if (player->feet.y > floor) {
         player->feet.y += player->vertical_speed * seconds - GRAVITY * seconds * seconds * 0.5f;
         player->vertical_speed -= GRAVITY * seconds;
@@ -143,7 +154,7 @@ void player_move(const Scene *scene, Player *player, float dx, float dz, float s
         else {
             player->sector = sector;
             float floor, ceiling;
-            clearance(scene, player, &floor, &ceiling);
+            player_clearance(scene, player, &floor, &ceiling);
             if (ceiling - floor < PLAYER_HEIGHT - CONTACT_GAP ||
                 ceiling - player->feet.y < PLAYER_HEIGHT - CONTACT_GAP ||
                 floor - player->feet.y > PLAYER_STEP + CONTACT_GAP) *player = previous;
@@ -154,7 +165,7 @@ void player_move(const Scene *scene, Player *player, float dx, float dz, float s
 
 void player_tick(const Scene *scene, Player *player, int forward, int sideways, float yaw, bool running) {
     float floor, ceiling;
-    clearance(scene, player, &floor, &ceiling);
+    player_clearance(scene, player, &floor, &ceiling);
     bool grounded = player->feet.y <= floor + CONTACT_GAP;
     if (grounded) {
         float forward_accel = (float)forward * (running ? 50 : 25) / 1024;
@@ -168,7 +179,7 @@ void player_tick(const Scene *scene, Player *player, int forward, int sideways, 
     player_move(scene, player, player->velocity_x, player->velocity_z, 1.0f / 35);
     player->velocity_x = player->feet.x - previous.x;
     player->velocity_z = player->feet.z - previous.z;
-    clearance(scene, player, &floor, &ceiling);
+    player_clearance(scene, player, &floor, &ceiling);
     if (player->feet.y <= floor + CONTACT_GAP) {
         player->velocity_x *= 29.0f / 32; player->velocity_z *= 29.0f / 32;
         if (!forward && !sideways && fabsf(player->velocity_x) < 0.0625f / 32 &&

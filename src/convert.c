@@ -543,6 +543,7 @@ static void make_things(Converter *converter) {
     bool spawn_found = false;
     Scene *scene = &converter->scene;
     scene->sprites = allocate(converter->things->size / 10, sizeof(Sprite));
+    scene->teleports = allocate(converter->things->size / 10, sizeof(Teleport));
     for (size_t index = 0; index < converter->things->size / 10; ++index) {
         const uint8_t *thing = record(converter->things, index, 10);
         unsigned type = read_u16(thing + 6), flags = read_u16(thing + 8);
@@ -556,7 +557,12 @@ static void make_things(Converter *converter) {
             spawn_found = true;
             continue;
         }
-        if (type == 2 || type == 3 || type == 4 || type == 11 || type == 14 || type == 87 || type == 89) continue;
+        if (type == 14) {
+            scene->teleports[scene->teleport_count++] = (Teleport){.position = position,
+                .yaw = (float)read_u16(thing + 4) * 0.01745329252f, .sector = sector_index};
+            continue;
+        }
+        if (type == 2 || type == 3 || type == 4 || type == 11 || type == 87 || type == 89) continue;
         if (!(flags & 2) || (flags & 16)) continue;
         const ThingImage *image = NULL;
         for (size_t image_index = 0; image_index < sizeof(thing_images) / sizeof(thing_images[0]); ++image_index)
@@ -577,7 +583,9 @@ static void make_things(Converter *converter) {
                 }
             }
         }
-        scene->sprites[scene->sprite_count++] = (Sprite){.asset = asset, .shade = image->flags & 1 ? 0 : shade(data), .position = position};
+        scene->sprites[scene->sprite_count++] = (Sprite){.asset = asset, .shade = image->flags & 1 ? 0 : shade(data),
+            .sector = sector_index, .position = position, .ceiling = (image->flags & 2) != 0,
+            .fullbright = (image->flags & 1) != 0};
     }
     if (!spawn_found) fail("Map has no player-one start");
 }
@@ -675,8 +683,12 @@ static Converter convert_map(const char *path, const char *map) {
     scene->lines = allocate(scene->line_count, sizeof(CollisionLine));
     for (size_t index = 0; index < scene->sector_count; ++index) {
         const uint8_t *data = sector(&converter, (unsigned)index);
-        scene->sectors[index] = (SceneSector){(float)read_i16(data) / 32, (float)read_i16(data + 2) / 32,
-                                            read_u16(data + 22), read_u16(data + 24)};
+        char floor_name[9] = {0}, ceiling_name[9] = {0};
+        memcpy(floor_name, data + 4, 8); memcpy(ceiling_name, data + 12, 8);
+        scene->sectors[index] = (SceneSector){.floor = (float)read_i16(data) / 32,
+            .ceiling = (float)read_i16(data + 2) / 32, .special = read_u16(data + 22), .tag = read_u16(data + 24),
+            .light = read_u16(data + 20), .floor_asset = get_asset(&converter, floor_name, 1),
+            .ceiling_asset = named(ceiling_name, "F_SKY1") ? UINT32_MAX : get_asset(&converter, ceiling_name, 1)};
     }
     for (size_t index = 0; index < scene->line_count; ++index) {
         const uint8_t *line = record(converter.lines, index, 14);

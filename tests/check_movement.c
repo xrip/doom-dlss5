@@ -9,8 +9,8 @@ static void expect(bool condition, const char *name) {
 }
 
 static Scene room(SceneSector *sectors, CollisionLine *lines, CollisionTriangle *regions) {
-    sectors[0] = (SceneSector){0, 4, 0, 0};
-    sectors[1] = (SceneSector){0, 4, 0, 7};
+    sectors[0] = (SceneSector){.ceiling = 4};
+    sectors[1] = (SceneSector){.ceiling = 4, .tag = 7};
     CollisionLine outline[] = {
         {{0, 0}, {0, 8}, 0, UINT32_MAX, 0, 0, 0},
         {{0, 0}, {4, 0}, 0, UINT32_MAX, 0, 0, 0},

@@ -65,23 +65,35 @@ Or call the WAD converter directly for one scene and sidecar:
 ## Controls and scope
 
 - `W`, `A`, `S`, `D` walk; the mouse turns the view.
-- `Left Shift` runs. `E` or `Space` uses normal, fast, keyed, and switch doors; walk-over doors activate on crossing.
+- `Left Shift` runs. `E` or `Space` uses doors, lowering floor switches, and returning lifts; walk triggers activate on crossing.
 - Left click activates gun-trigger doors. It does not fire a weapon or start combat.
 - Keys and skulls are picked up by proximity. `R` returns to the player start and keeps collected keys.
 - `Tab` releases or captures the mouse. `Esc` closes the viewer.
 - `N` toggles noclip. In noclip, `Space` and `Left Ctrl` move up and down.
 
-The original Doom II MAP01–MAP32 convert locally. The viewer and door logic
-remain a partial game simulation: door states are not saved, monsters stay
-static, and elevators, floor triggers, teleports, and exit transitions are
-not implemented. Use `N` noclip to explore routes past these missing game
-systems. There is no enemy AI, weapon combat, or full game progression.
+The original Doom II MAP01–MAP32 convert locally. Map geometry interaction,
+lights, hazards, secrets, teleports, and exits are active; see
+[INTERACTION.md](INTERACTION.md). The simulation is still partial: sector
+states are not saved and monsters stay static. Monster-only and boss-death
+actions need AI/combat. Use `N` noclip to explore those remaining paths.
+There is no weapon combat or full inventory/progression simulation.
+Exit switches show map completion. Enter loads the next prepared scene and
+its MIDI from the current scene's folder. Run `convert-all.ps1` first so the
+next map exists. Missing next scenes produce a message, not a WAD read.
+Secret exits use MAP15→MAP31→MAP32; normal exits from MAP31/32 return to MAP16.
+
 Success on the original maps does not promise exact compatibility with every
 Doom II WAD or gameplay behavior.
 
 ## Validation
 
 The latest integration run converted all 32 maps, validated their MIDI
-sidecars, rendered a GPU frame, and passed all nine CTest tests. The batch
+sidecars, rendered a GPU frame, and passed the CTest suite. Floor tests
+check MAP01's four barriers and returning lift, plus speed, delays, riding,
+sprite anchors, and blocked lift reversal. The batch
 script stops at the first conversion error and does not run map-specific test
 executables.
+
+Prepared scenes now use DRMAP005 for sector light/material data, sprite
+anchors/fullbright flags, and teleport destinations. Reconvert older files
+with `convert-all.ps1` or `run-map.ps1`; previous versions are not accepted.

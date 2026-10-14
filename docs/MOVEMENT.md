@@ -1,4 +1,4 @@
-# Player movement and door data
+# Player movement and sector actions
 
 The normal camera is a walking player. Its feet have an x/z position and
 a height. The camera stays 41 Doom units above the feet. The collision
@@ -67,6 +67,37 @@ door wall UVs follow current sector heights. Only changed GPU buffers are
 updated. The action definitions and key colors are in the
 [Doom Builder guide](https://www.doombuilder.com/files/doombuilder1guide.pdf).
 
+## Lowering floors and lifts
+
+Floor switches share the door use ray, tag lookup, and switch animation.
+All sectors with the action's nonzero tag move together. A busy sector does
+not consume a one-shot floor action; doors and floors cannot move in the
+same sector at the same time. Walk triggers use the same crossing test as doors.
+
+Supported classic floor specials:
+
+| Motion | Use once / repeat | Walk once / repeat | Units per tic |
+| --- | --- | --- | --- |
+| Lower to highest neighbor | 102 / 45 | 19 / 83 | 1 |
+| Lower to lowest neighbor | 23 / 60 | 38 / 82 | 1 |
+| Lower to highest neighbor + 8 | 71 / 70 | 36 / 98 | 4 |
+| Lower, wait, return lift | 21 / 62 | 10 / 88 | 4 |
+| Fast lower, wait, return lift | 122 / 123 | 121 / 120 | 8 |
+
+Lifts lower to the lowest neighboring floor, wait 105 tics (3 seconds),
+then return to their starting height. A blocked rising lift reverses
+without crushing the player. The grounded player rides the moving floor;
+an airborne player is not pulled down. Grounded sprites follow their owner
+floor; hanging sprites stay at their ceiling anchor. Floor meshes and
+adjoining wall positions/UVs use current heights, with no WAD reads or
+runtime mesh rebuilds. Noclip has no body to block sector motion.
+
+MAP01 switch 102 lowers tagged sectors 46, 47, 50, and 51 from 112 to 48.
+Switch 62 lowers sector 21 from 152 to 40, waits, and returns. The rates,
+destinations, and delays follow the
+[Doom Builder guide](https://www.doombuilder.com/files/doombuilder1guide.pdf).
+Tick-boundary and fixed-point/demo parity are not claimed.
+
 ## Keys and exploration
 
 Touch cards or skulls to collect their blue/yellow/red key color. Cards and
@@ -74,6 +105,8 @@ skulls of the same color open the same classic lock. Colored squares show
 held keys. `--all-keys` grants all colors for exploration; R and returning
 from noclip keep them. Picked-up key sprites disappear.
 
-Lifts, floor movers, teleports, boss triggers, exits/level transitions,
-combat, door sounds, and non-key pickups remain unimplemented. N provides
-noclip for exploration past those features.
+Raising floors, stairs, texture/type changes, perpetual platforms, crushers,
+teleports, light effects, secret sectors, hazards, and exits are described
+in [INTERACTION.md](INTERACTION.md). Combat, boss-death triggers, door sounds,
+and non-key pickups remain unimplemented. N provides noclip for exploration
+past those features.

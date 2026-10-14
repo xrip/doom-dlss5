@@ -14,6 +14,7 @@ typedef struct {
     float velocity_x, velocity_z, view_height, view_speed;
     uint32_t ticks;
     uint32_t keys;
+    unsigned health, teleport_wait;
 } Player;
 
 uint32_t scene_sector_at(const Scene *scene, float x, float z, uint32_t hint);
@@ -22,3 +23,5 @@ void player_move(const Scene *scene, Player *player, float dx, float dz, float s
 void player_tick(const Scene *scene, Player *player, int forward, int sideways, float yaw, bool running);
 float player_view_y(const Scene *scene, const Player *player);
 void player_pickup_keys(Scene *scene, Player *player);
+void player_clearance(const Scene *scene, const Player *player, float *floor, float *ceiling);
+bool player_touches_sector(const Scene *scene, const Player *player, uint32_t sector);

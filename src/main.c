@@ -1,7 +1,7 @@
 #include "scene.h"
 #include "movement.h"
 #include "music.h"
-#include "doors.h"
+#include "specials.h"
 
 #include "raylib.h"
 #include "raymath.h"
@@ -104,11 +104,23 @@ static Camera3D start_camera(const Scene *scene, bool overview) {
     return camera;
 }
 
-static void update_geometry(Scene *scene, const Doors *doors, Mesh *meshes, bool *dirty, const uint32_t *base_assets) {
+static bool update_shade(Mesh *mesh, size_t first, size_t count, unsigned shade) {
+    bool changed = false;
+    for (size_t index = first; index < first + count; ++index) {
+        if (mesh->colors[index * 4] == shade) continue;
+        mesh->colors[index * 4] = (unsigned char)shade; changed = true;
+    }
+    return changed;
+}
+
+static unsigned sector_shade(const SceneSector *sector) { return (255 - sector->light) * 31 / 255; }
+
+static void update_geometry(Scene *scene, const Specials *specials, Mesh *meshes, bool *dirty, const uint32_t *base_assets) {
     memset(dirty, 0, scene->batch_count * sizeof(bool));
     for (size_t index = 0; index < scene->batch_count; ++index) {
         Batch *batch = &scene->batches[index];
         if (batch->plane != SURFACE_FLOOR && batch->plane != SURFACE_CEILING) continue;
+        dirty[index] = update_shade(&meshes[index], 0, batch->count, sector_shade(&scene->sectors[batch->owner]));
         float height = batch->plane == SURFACE_FLOOR ? scene->sectors[batch->owner].floor : scene->sectors[batch->owner].ceiling;
         if (meshes[index].vertices[1] == height) continue;
         for (size_t vertex = 0; vertex < batch->count; ++vertex) meshes[index].vertices[vertex * 3 + 1] = height;
@@ -118,10 +130,13 @@ static void update_geometry(Scene *scene, const Doors *doors, Mesh *meshes, bool
         const WallSurface *wall = &scene->walls[index];
         Batch *batch = &scene->batches[wall->batch];
         if (wall->switch_asset != UINT32_MAX)
-            batch->asset = !scene->lines[wall->line].special || doors->switch_ticks[wall->line] ?
+            batch->asset = !scene->lines[wall->line].special || specials->switch_ticks[wall->line] ?
                            wall->switch_asset : base_assets[wall->batch];
         SceneVertex vertices[6]; wall_vertices(scene, wall, vertices);
         Mesh *mesh = &meshes[wall->batch];
+        const CollisionLine *line = &scene->lines[wall->line];
+        uint32_t sector = wall->side ? line->back : line->front;
+        dirty[wall->batch] = update_shade(mesh, wall->first, 6, sector_shade(&scene->sectors[sector])) || dirty[wall->batch];
         for (size_t corner = 0; corner < 6; ++corner) {
             size_t vertex = wall->first + corner;
             float *position = mesh->vertices + vertex * 3, *uv = mesh->texcoords + vertex * 2;
@@ -136,10 +151,11 @@ static void update_geometry(Scene *scene, const Doors *doors, Mesh *meshes, bool
         if (!dirty[index]) continue;
         UpdateMeshBuffer(meshes[index], 0, meshes[index].vertices, (int)(scene->batches[index].count * 3 * sizeof(float)), 0);
         UpdateMeshBuffer(meshes[index], 1, meshes[index].texcoords, (int)(scene->batches[index].count * 2 * sizeof(float)), 0);
+        UpdateMeshBuffer(meshes[index], 3, meshes[index].colors, (int)(scene->batches[index].count * 4), 0);
     }
 }
 
-static void move_camera(Scene *scene, Doors *doors, Player *player, Camera3D *camera,
+static void move_camera(Scene *scene, Specials *specials, Player *player, Camera3D *camera,
                         float *yaw, float *pitch, bool *captured, bool noclip,
                         double *accumulator, bool *use_pending) {
     if (IsKeyPressed(KEY_TAB)) {
@@ -164,16 +180,19 @@ static void move_camera(Scene *scene, Doors *doors, Player *player, Camera3D *ca
         if (Vector3LengthSqr(motion) > 0) camera->position = Vector3Add(camera->position, Vector3Scale(Vector3Normalize(motion), step));
     }
     if (!noclip && (IsKeyPressed(KEY_E) || IsKeyPressed(KEY_SPACE))) *use_pending = true;
-    if (!noclip && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) doors_shoot(scene, doors, player, *yaw);
+    if (!noclip && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) specials_shoot(scene, specials, player, *yaw);
     *accumulator += seconds;
     while (*accumulator >= 1.0 / 35) {
-        if (*use_pending) { doors_use(scene, doors, player, *yaw); *use_pending = false; }
-        doors_tick(scene, doors, player);
+        if (specials->exited) { *accumulator = 0; break; }
+        if (*use_pending) { specials_use(scene, specials, player, *yaw); *use_pending = false; }
+        specials_tick(scene, specials, noclip ? NULL : player);
         if (!noclip) {
             Position previous = player->feet;
-            player_tick(scene, player, forward_input, side_input, *yaw, running);
+            bool can_move = player->health && !player->teleport_wait;
+            player_tick(scene, player, can_move ? forward_input : 0, can_move ? side_input : 0, *yaw, running);
             player_pickup_keys(scene, player);
-            doors_cross(scene, doors, previous, player->feet);
+            if (specials_cross(scene, specials, previous, player->feet, player)) *yaw = specials->teleport_yaw;
+            specials_player(scene, specials, player);
         }
         *accumulator -= 1.0 / 35;
     }
@@ -220,12 +239,14 @@ int main(int argc, char **argv) {
         else path = argv[index];
     }
     if (screenshot && !frames) frames = 2;
+    char *current_path = NULL;
+load_scene:
     Scene scene = scene_read(path);
     scene_print(&scene);
     if (inspect) { scene_free(&scene); return 0; }
     Player player = player_spawn(&scene);
     if (all_keys) player.keys = 7;
-    Doors doors = doors_create(&scene);
+    Specials specials = specials_create(&scene);
     noclip = noclip || overview;
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | (frames ? FLAG_WINDOW_HIDDEN : FLAG_VSYNC_HINT));
@@ -282,6 +303,8 @@ int main(int argc, char **argv) {
     }
     rlSetClipPlanes(0.02, 10000);
     int frame = 0;
+    char *next_map = NULL;
+    bool exit_checked = false, next_exists = false, advance = false;
     while (!WindowShouldClose() && (!frames || frame < frames)) {
         music_update();
         if (!frames) {
@@ -294,10 +317,19 @@ int main(int argc, char **argv) {
                 uint32_t keys = player.keys; player = player_spawn(&scene); player.keys = keys;
                 camera = start_camera(&scene, false); yaw = scene.yaw; pitch = 0;
             }
-            move_camera(&scene, &doors, &player, &camera, &yaw, &pitch, &captured, noclip, &accumulator, &use_pending);
+            move_camera(&scene, &specials, &player, &camera, &yaw, &pitch, &captured, noclip, &accumulator, &use_pending);
         }
         if (!overview) camera.fovy = 2 * atanf((float)GetScreenHeight() / (float)GetScreenWidth()) * RAD2DEG;
-        update_geometry(&scene, &doors, meshes, dirty, base_assets);
+        update_geometry(&scene, &specials, meshes, dirty, base_assets);
+        for (size_t index = 0; index < scene.sprite_count; ++index) {
+            const Sprite *sprite = &scene.sprites[index];
+            unsigned shade = sprite->fullbright ? 0 : sector_shade(&scene.sectors[sprite->sector]);
+            if (update_shade(&sprites[index], 0, 6, shade)) UpdateMeshBuffer(sprites[index], 3, sprites[index].colors, 24, 0);
+        }
+        if (specials.exited && !exit_checked) {
+            next_map = specials_next_map(&scene, &specials, path); next_exists = next_map && FileExists(next_map);
+            exit_checked = true;
+        }
         SetShaderValue(shader, camera_location, &camera.position, SHADER_UNIFORM_VEC3);
         BeginDrawing();
         ClearBackground(BLACK);
@@ -335,6 +367,17 @@ int main(int argc, char **argv) {
             DrawRectangle(GetScreenWidth() - 180, 10, 12, 12, player.keys & 1 ? BLUE : DARKGRAY);
             DrawRectangle(GetScreenWidth() - 160, 10, 12, 12, player.keys & 2 ? YELLOW : DARKGRAY);
             DrawRectangle(GetScreenWidth() - 140, 10, 12, 12, player.keys & 4 ? RED : DARKGRAY);
+            DrawText(TextFormat("Health %u | Secrets %u/%u", player.health, specials.secrets, specials.total_secrets),
+                     12, 40, 18, RAYWHITE);
+            if (specials.secret_message) DrawText("A secret is found!", 12, 66, 20, YELLOW);
+            if (!player.health) DrawText("R: return to start", 12, 92, 20, RED);
+            if (specials.exited) {
+                DrawRectangle(0, 120, GetScreenWidth(), 120, (Color){0, 0, 0, 210});
+                DrawText(TextFormat("%s complete | Secrets %u/%u", scene.map, specials.secrets, specials.total_secrets), 24, 144, 24, RAYWHITE);
+                DrawText(next_exists ? "Enter: next map | Esc: quit" : next_map ?
+                         "Next map is not prepared. Use convert-all.ps1. Esc: quit" : "End of Doom II | Esc: quit", 24, 188, 20, RAYWHITE);
+                if (next_exists && IsKeyPressed(KEY_ENTER)) advance = true;
+            }
         }
         if (screenshot && frame == frames - 1) {
             Image capture = LoadImageFromScreen();
@@ -343,6 +386,7 @@ int main(int argc, char **argv) {
         }
         EndDrawing();
         ++frame;
+        if (advance) break;
     }
     printf("Rendered %d frames\n", frame);
     music_stop();
@@ -354,9 +398,14 @@ int main(int argc, char **argv) {
     MemFree(material.maps);
     UnloadTexture(lut); UnloadShader(shader);
     free(sprites); free(meshes); free(textures);
-    free(dirty); doors_free(&doors);
+    free(dirty); specials_free(&specials);
     free(base_assets);
     CloseWindow();
     scene_free(&scene);
+    if (advance) {
+        free(current_path); current_path = next_map; path = current_path; music_path = NULL;
+        goto load_scene;
+    }
+    free(next_map); free(current_path);
     return 0;
 }

@@ -1,4 +1,4 @@
-#include "doors.h"
+#include "specials.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -9,73 +9,73 @@ static void expect(bool condition, const char *name) {
 }
 
 static void synthetic(void) {
-    SceneSector sectors[] = {{0, 4, 0, 0}, {0, 0, 0, 7}, {0, 5, 0, 0}};
+    SceneSector sectors[] = {{.ceiling = 4}, {.tag = 7}, {.ceiling = 5}};
     CollisionLine lines[] = {{{4, 0}, {4, 8}, 0, 1, 4, 1, 0},
                              {{4.5f, 8}, {4.5f, 0}, 2, 1, 4, 1, 0},
                              {{3, 0}, {3, 8}, 0, UINT32_MAX, 1, 0, 0}};
     Scene scene = {.sector_count = 3, .line_count = 2, .sectors = sectors, .lines = lines};
     Player player = {.feet = {2, 0, 4}, .sector = 0};
-    Doors doors = doors_create(&scene);
-    expect(!doors_use(&scene, &doors, &player, 3.14159265f), "use faces the door");
-    expect(doors_use(&scene, &doors, &player, 0), "64-unit use reach");
-    for (unsigned tick = 0; tick < 61; ++tick) doors_tick(&scene, &doors, &player);
-    expect(sectors[1].ceiling == 122.0f / 32 && doors.sectors[1].state == DOOR_OPENING, "two units per tic");
-    doors_tick(&scene, &doors, &player);
-    expect(sectors[1].ceiling == 124.0f / 32 && doors.sectors[1].state == DOOR_WAIT_OPEN, "four-unit ceiling gap");
-    for (unsigned tick = 0; tick < 149; ++tick) doors_tick(&scene, &doors, &player);
-    expect(doors.sectors[1].state == DOOR_WAIT_OPEN && doors.sectors[1].wait == 1, "150-tic wait");
-    doors_tick(&scene, &doors, &player);
-    expect(doors.sectors[1].state == DOOR_CLOSING, "wait then close");
-    for (unsigned tick = 0; tick < 62; ++tick) doors_tick(&scene, &doors, &player);
-    expect(sectors[1].ceiling == 0 && doors.sectors[1].state == DOOR_STOPPED, "full close cycle");
-    expect(doors_use(&scene, &doors, &player, 0), "repeat use");
-    doors_tick(&scene, &doors, &player);
-    expect(doors_use(&scene, &doors, &player, 0) && doors.sectors[1].state == DOOR_CLOSING, "use reverses opening");
-    expect(doors_use(&scene, &doors, &player, 0) && doors.sectors[1].state == DOOR_OPENING, "use reverses closing");
-    for (unsigned tick = 0; tick < 212; ++tick) doors_tick(&scene, &doors, &player);
+    Specials specials = specials_create(&scene);
+    expect(!specials_use(&scene, &specials, &player, 3.14159265f), "use faces the door");
+    expect(specials_use(&scene, &specials, &player, 0), "64-unit use reach");
+    for (unsigned tick = 0; tick < 61; ++tick) specials_tick(&scene, &specials, &player);
+    expect(sectors[1].ceiling == 122.0f / 32 && specials.doors[1].state == DOOR_OPENING, "two units per tic");
+    specials_tick(&scene, &specials, &player);
+    expect(sectors[1].ceiling == 124.0f / 32 && specials.doors[1].state == DOOR_WAIT_OPEN, "four-unit ceiling gap");
+    for (unsigned tick = 0; tick < 149; ++tick) specials_tick(&scene, &specials, &player);
+    expect(specials.doors[1].state == DOOR_WAIT_OPEN && specials.doors[1].wait == 1, "150-tic wait");
+    specials_tick(&scene, &specials, &player);
+    expect(specials.doors[1].state == DOOR_CLOSING, "wait then close");
+    for (unsigned tick = 0; tick < 62; ++tick) specials_tick(&scene, &specials, &player);
+    expect(sectors[1].ceiling == 0 && specials.doors[1].state == DOOR_STOPPED, "full close cycle");
+    expect(specials_use(&scene, &specials, &player, 0), "repeat use");
+    specials_tick(&scene, &specials, &player);
+    expect(specials_use(&scene, &specials, &player, 0) && specials.doors[1].state == DOOR_CLOSING, "use reverses opening");
+    expect(specials_use(&scene, &specials, &player, 0) && specials.doors[1].state == DOOR_OPENING, "use reverses closing");
+    for (unsigned tick = 0; tick < 212; ++tick) specials_tick(&scene, &specials, &player);
     player.feet.x = 4.25f; player.sector = 1;
-    for (unsigned tick = 0; tick < 35; ++tick) doors_tick(&scene, &doors, &player);
-    expect(doors.sectors[1].state == DOOR_OPENING && sectors[1].ceiling >= PLAYER_HEIGHT, "closing reverses on player");
-    doors_free(&doors); doors = doors_create(&scene);
+    for (unsigned tick = 0; tick < 35; ++tick) specials_tick(&scene, &specials, &player);
+    expect(specials.doors[1].state == DOOR_OPENING && sectors[1].ceiling >= PLAYER_HEIGHT, "closing reverses on player");
+    specials_free(&specials); specials = specials_create(&scene);
     sectors[1].ceiling = 0; lines[0].special = 31;
     player.feet.x = 2; player.sector = 0;
-    expect(doors_use(&scene, &doors, &player, 0) && lines[0].special == 0, "D1 open once");
-    for (unsigned tick = 0; tick < 500; ++tick) doors_tick(&scene, &doors, &player);
-    expect(sectors[1].ceiling == 124.0f / 32 && doors.sectors[1].state == DOOR_OPEN, "D1 stays open");
-    doors_free(&doors); scene.line_count = 3; doors = doors_create(&scene);
+    expect(specials_use(&scene, &specials, &player, 0) && lines[0].special == 0, "D1 open once");
+    for (unsigned tick = 0; tick < 500; ++tick) specials_tick(&scene, &specials, &player);
+    expect(sectors[1].ceiling == 124.0f / 32 && specials.doors[1].state == DOOR_OPEN, "D1 stays open");
+    specials_free(&specials); scene.line_count = 3; specials = specials_create(&scene);
     sectors[1].ceiling = 0; lines[0].special = 1;
-    expect(!doors_use(&scene, &doors, &player, 0), "wall blocks use ray");
+    expect(!specials_use(&scene, &specials, &player, 0), "wall blocks use ray");
     lines[2].special = 103; lines[2].tag = 7;
-    expect(doors_use(&scene, &doors, &player, 0) && lines[2].special == 0, "tagged switch opens door");
-    doors_free(&doors); doors = doors_create(&scene);
+    expect(specials_use(&scene, &specials, &player, 0) && lines[2].special == 0, "tagged switch opens door");
+    specials_free(&specials); specials = specials_create(&scene);
     sectors[1].ceiling = 0; lines[2].special = 2; lines[2].back = 0;
-    doors_cross(&scene, &doors, player.feet, (Position){3.5f, 0, 4});
-    expect(doors.sectors[1].state == DOOR_OPENING && lines[2].special == 0, "walk-over door trigger");
-    doors_free(&doors);
-    doors = doors_create(&scene); scene.line_count = 2; sectors[1].ceiling = 0;
+    specials_cross(&scene, &specials, player.feet, (Position){3.5f, 0, 4}, NULL);
+    expect(specials.doors[1].state == DOOR_OPENING && lines[2].special == 0, "walk-over door trigger");
+    specials_free(&specials);
+    specials = specials_create(&scene); scene.line_count = 2; sectors[1].ceiling = 0;
     lines[0].special = 26; player.keys = 0;
-    expect(!doors_use(&scene, &doors, &player, 0), "blue door requires a key");
+    expect(!specials_use(&scene, &specials, &player, 0), "blue door requires a key");
     player.keys = 4;
-    expect(!doors_use(&scene, &doors, &player, 0), "red key does not open blue door");
+    expect(!specials_use(&scene, &specials, &player, 0), "red key does not open blue door");
     player.keys = 1;
-    expect(doors_use(&scene, &doors, &player, 0), "blue key opens blue door");
-    doors_free(&doors); doors = doors_create(&scene); sectors[1].ceiling = 0;
+    expect(specials_use(&scene, &specials, &player, 0), "blue key opens blue door");
+    specials_free(&specials); specials = specials_create(&scene); sectors[1].ceiling = 0;
     lines[0].special = 117;
-    expect(doors_use(&scene, &doors, &player, 0), "fast manual door");
-    doors_tick(&scene, &doors, &player);
+    expect(specials_use(&scene, &specials, &player, 0), "fast manual door");
+    specials_tick(&scene, &specials, &player);
     expect(sectors[1].ceiling == 8.0f / 32, "fast door eight units per tic");
-    doors_free(&doors); scene.line_count = 3; doors = doors_create(&scene); sectors[1].ceiling = 4;
+    specials_free(&specials); scene.line_count = 3; specials = specials_create(&scene); sectors[1].ceiling = 4;
     lines[2].special = 16; lines[2].back = 0;
-    doors_cross(&scene, &doors, player.feet, (Position){3.5f, 0, 4});
-    for (unsigned tick = 0; tick < 64; ++tick) doors_tick(&scene, &doors, &player);
-    expect(sectors[1].ceiling == 0 && doors.sectors[1].state == DOOR_WAIT_CLOSED, "close then wait thirty seconds");
-    for (unsigned tick = 0; tick < 1050; ++tick) doors_tick(&scene, &doors, &player);
-    expect(doors.sectors[1].state == DOOR_OPENING, "thirty-second timer expires at 1050 tics");
-    doors_free(&doors); doors = doors_create(&scene); sectors[1].ceiling = 0;
+    specials_cross(&scene, &specials, player.feet, (Position){3.5f, 0, 4}, NULL);
+    for (unsigned tick = 0; tick < 64; ++tick) specials_tick(&scene, &specials, &player);
+    expect(sectors[1].ceiling == 0 && specials.doors[1].state == DOOR_WAIT_CLOSED, "close then wait thirty seconds");
+    for (unsigned tick = 0; tick < 1050; ++tick) specials_tick(&scene, &specials, &player);
+    expect(specials.doors[1].state == DOOR_OPENING, "thirty-second timer expires at 1050 tics");
+    specials_free(&specials); specials = specials_create(&scene); sectors[1].ceiling = 0;
     lines[2].special = 46;
-    expect(!doors_use(&scene, &doors, &player, 0), "gun door does not use ordinary use key");
-    expect(doors_shoot(&scene, &doors, &player, 0), "shoot trigger opens door");
-    doors_free(&doors);
+    expect(!specials_use(&scene, &specials, &player, 0), "gun door does not use ordinary use key");
+    expect(specials_shoot(&scene, &specials, &player, 0), "shoot trigger opens door");
+    specials_free(&specials);
     Asset assets[3] = {{.name = "BKEYA0"}, {.name = "YSKUA0"}, {.name = "RKEYA0"}};
     Sprite sprites[3] = {{.asset = 0, .position = {2, 0, 4}}, {.asset = 1, .position = {2, 0, 4}},
                          {.asset = 2, .position = {7, 0, 4}}};
@@ -88,7 +88,7 @@ static void synthetic(void) {
 
 static void real_map(const char *path, const char *prefix) {
     Scene scene = scene_read(path);
-    Doors doors = doors_create(&scene);
+    Specials specials = specials_create(&scene);
     CollisionLine *line = &scene.lines[170];
     float dx = line->end.x - line->start.x, dz = line->end.z - line->start.z;
     float length = hypotf(dx, dz), nx = -dz / length, nz = dx / length;
@@ -102,14 +102,14 @@ static void real_map(const char *path, const char *prefix) {
     if (prefix) {
         char *closed = scene_sidecar(prefix, "-closed.drmap"); scene_write(&scene, closed); free(closed);
     }
-    expect(doors_use(&scene, &doors, &player, scene.yaw), "MAP01 door use");
+    expect(specials_use(&scene, &specials, &player, scene.yaw), "MAP01 door use");
     float before = scene.sectors[sector].ceiling;
     WallSurface *surface = NULL;
     for (size_t index = 0; index < scene.wall_count; ++index)
         if (scene.walls[index].line == 170 && scene.walls[index].kind == WALL_UPPER && !scene.walls[index].side) surface = &scene.walls[index];
     expect(surface != NULL, "MAP01 door render binding");
     SceneVertex old_vertices[6], new_vertices[6]; wall_vertices(&scene, surface, old_vertices);
-    for (unsigned tick = 0; tick < 100; ++tick) doors_tick(&scene, &doors, &player);
+    for (unsigned tick = 0; tick < 100; ++tick) specials_tick(&scene, &specials, &player);
     wall_vertices(&scene, surface, new_vertices);
     expect(scene.sectors[sector].ceiling > before && new_vertices[0].y > old_vertices[0].y,
            "MAP01 door collision and render height move together");
@@ -120,7 +120,7 @@ static void real_map(const char *path, const char *prefix) {
     player_move(&scene, &player, -nx * 2, -nz * 2, 0.1f);
     expect(player.sector != line->front, "MAP01 open doorway passes player");
     printf("MAP01 door 29: ceiling %.3f -> %.3f; wall and UV bindings checked\n", before, scene.sectors[sector].ceiling);
-    doors_free(&doors); scene_free(&scene);
+    specials_free(&specials); scene_free(&scene);
 }
 
 int main(int argc, char **argv) {

@@ -56,7 +56,7 @@ def check_midi(data):
 
 
 def main():
-    converter, viewer, wad = sys.argv[1:]
+    converter, viewer, wad, interaction = sys.argv[1:]
     songs = ["D_RUNNIN", "D_STALKS", "D_COUNTD", "D_BETWEE", "D_DOOM", "D_THE_DA", "D_SHAWN", "D_DDTBLU",
              "D_IN_CIT", "D_DEAD", "D_STLKS2", "D_THEDA2", "D_DOOM2", "D_DDTBL2", "D_RUNNI2", "D_DEAD2",
              "D_STLKS3", "D_ROMERO", "D_SHAWN2", "D_MESSAG", "D_COUNT2", "D_DDTBL3", "D_AMPIE", "D_THEDA3",
@@ -69,6 +69,7 @@ def main():
             if f"Converted {songs[number - 1]} " not in result.stdout:
                 raise AssertionError(f"Wrong music for {map_name}")
             run([viewer, str(scene), "--inspect"])
+            run([interaction, str(scene), "--coverage"])
             check_midi(scene.with_suffix(".mid").read_bytes())
     print("All 32 Doom II levels converted, loaded, and matched to valid MIDI music")
 

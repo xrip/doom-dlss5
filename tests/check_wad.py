@@ -107,7 +107,7 @@ def collision_start(data):
     for _ in range(batches):
         count = struct.unpack_from("<I", data, offset + 12)[0]
         offset += 24 + count * 20
-    return offset + sprites * 20
+    return offset + sprites * 28
 
 
 def main():
@@ -124,7 +124,7 @@ def main():
         result = run([viewer, str(scene), "--inspect"])
         assert "12 triangles, 0 sprites" in result.stdout
         good_scene = scene.read_bytes()
-        assert good_scene[:8] == b"DRMAP003"
+        assert good_scene[:8] == b"DRMAP005"
         asset_count, batch_count, sprite_count = struct.unpack_from("<III", good_scene, 16)
         assert (asset_count, batch_count, sprite_count) == (2, 3, 0)
         offset = 44 + 32768
@@ -153,9 +153,34 @@ def main():
         bottle_scene = root / "bottle.drmap"
         run([converter, str(wad), str(bottle_scene)])
         data = bottle_scene.read_bytes()
-        sprite_offset = collision_start(data) - 20
-        assert struct.unpack_from("<f", data, sprite_offset + 12)[0] == 2 / 32
+        sprite_offset = collision_start(data) - 28
+        assert struct.unpack_from("<II", data, sprite_offset + 8) == (0, 0)
+        assert struct.unpack_from("<f", data, sprite_offset + 20)[0] == 2 / 32
         checks += 1
+        for field, value in ((sprite_offset + 8, 99), (sprite_offset + 12, 4)):
+            invalid = bytearray(data)
+            struct.pack_into("<I", invalid, field, value)
+            bottle_scene.write_bytes(invalid)
+            run([viewer, str(bottle_scene), "--inspect"], good=False)
+            checks += 1
+        teleport_lumps = [(key, contents + struct.pack("<hhHHH", 96, 64, 90, 14, 7) if key == "THINGS" else contents)
+                          for key, contents in lumps]
+        wad.write_bytes(make_wad(teleport_lumps))
+        teleport_scene = root / "teleport.drmap"
+        run([converter, str(wad), str(teleport_scene)])
+        run([viewer, str(teleport_scene), "--inspect"])
+        teleport_data = teleport_scene.read_bytes()
+        assert struct.unpack_from("<I", teleport_data, len(teleport_data) - 24)[0] == 1
+        destination = struct.unpack_from("<4fI", teleport_data, len(teleport_data) - 20)
+        assert destination[:3] == (3, 0, -2) and abs(destination[3] - 1.57079633) < 0.00001 and destination[4] == 0
+        checks += 1
+        for offset, value in ((len(teleport_data) - 24, 65537), (len(teleport_data) - 8, 0x7FC00000),
+                              (len(teleport_data) - 4, 99)):
+            invalid = bytearray(teleport_data)
+            struct.pack_into("<I", invalid, offset, value)
+            teleport_scene.write_bytes(invalid)
+            run([viewer, str(teleport_scene), "--inspect"], good=False)
+            checks += 1
         texture = dict(lumps)["TEXTURE1"][8:]
         sky_texture = name("SKY1") + texture[8:]
         sky_lumps = []
@@ -198,8 +223,8 @@ def main():
         data = door_scene.read_bytes()
         offset = collision_start(data)
         assert struct.unpack_from("<3I", data, offset) == (2, 7, 4)
-        assert struct.unpack_from("<ffII", data, offset + 12 + 16) == (0, 0, 0, 7)
-        assert struct.unpack_from("<5I", data, offset + 12 + 32 + 6 * 36 + 16) == (0, 1, 4, 1, 7)
+        assert struct.unpack_from("<ffII", data, offset + 12 + 28) == (0, 0, 0, 7)
+        assert struct.unpack_from("<5I", data, offset + 12 + 56 + 6 * 36 + 16) == (0, 1, 4, 1, 7)
         checks += 1
         shapes = [
             ([[(0, 0), (0, 128), (128, 128), (128, 0)], [(32, 32), (96, 32), (96, 96), (32, 96)]], 32),
@@ -240,8 +265,9 @@ def main():
             checks += 1
         for field, value in ((16, 0xFFFFFFFF), (28, 0x7FC00000), (44 + 32768 + 8, 0), (44 + 32768 + 16, 0x80000000),
                              (collision_offset, 0), (collision_offset + 12 + 4, 0xBF800000),
-                             (collision_offset + 12 + 16 + 16, 99),
-                             (collision_offset + 12 + 16 + line_count * 36 + 24, 99)):
+                             (collision_offset + 12 + 16, 999),
+                             (collision_offset + 12 + 28 + 16, 99),
+                             (collision_offset + 12 + 28 + line_count * 36 + 24, 99)):
             data = bytearray(good_scene)
             struct.pack_into("<I", data, field, value)
             scene.write_bytes(data)

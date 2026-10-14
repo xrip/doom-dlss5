@@ -13,6 +13,7 @@ engine source or renderer port source was used to write this PoC.
 - [libtess2](https://github.com/memononen/libtess2): sector contour tessellation, used only by the converter.
 - [The Unofficial Doom Specs, chapter 4](https://github.com/nukeop/TheUnofficialDoomSpecs/blob/master/Chapter4.md): player dimensions, floor step limit, linedef flags, sector IDs, specials, and tags.
 - [Doom Builder guide](https://www.doombuilder.com/files/doombuilder1guide.pdf): door actions and key colors.
+- [Boom reference](https://raw.githubusercontent.com/fabiangreffrath/woof/master/docs/boomref.txt): public tables of classic floor, stair, platform, crusher, light, teleport, scrolling, exit, and sector actions. Only the documentation was used, not port implementation source.
 - [Movement comparison](https://github.com/0dot0repeating/quakemovement#useful-info-i-guess): documented acceleration, friction, terminal speeds, and their formula; no movement engine source was copied.
 - [WinMM MCI](https://learn.microsoft.com/en-us/windows/win32/multimedia/mci): native Windows MIDI sequencer commands.
 

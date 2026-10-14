@@ -1,5 +1,9 @@
 # YAGNI, KISS, and DRY review
 
+This is the historical review for the initial checkpoint. Later floor/lift
+support shares controls in `src/specials.c` and `src/sector_movers.c` and
+uses DRMAP005. This report's older paths and format checks remain historical.
+
 Scope: every project-owned source, shader, test, build file, utility, and
 document. All 33 files present at the start were read. New shared helpers
 and this report were also reviewed. Generated build files, downloaded
@@ -7,6 +11,30 @@ dependencies, Git internals, and the user's commercial WAD are not project
 source and are excluded from the commit. There were no earlier commits.
 
 ## Changes
+
+### Current interaction review
+
+The follow-up review checked the current project-owned text files and the
+initial committed checkpoint. Requested interaction families are retained:
+their need comes from actual original Doom II map actions, not a future
+engine roadmap. No renderer backend framework, ECS, or plugin layer is added.
+
+Confirmed waste removed from the later interaction code:
+
+- Remove `silent` flags: sound effects do not exist, so no runtime reads them.
+- Remove stored `blocked` flags: tests now observe motion, height, and health
+  instead of requiring write-only production state.
+- Remove the copied mover sector count; scene data owns its dimensions.
+- Share line adjacency and player-radius sector contact checks between doors,
+  floors, and crushers. No duplicated collision predicate remains there.
+
+The current build passes all 14 CTest tests, including 397 observable mover
+checks and the 32-map action inventory. Native DRMAP005 layout is unchanged
+by this cleanup. File validation remains: WAD/native inputs can be malformed.
+Small independent test helpers are not replaced by a new test framework.
+This is a code review, not a claim of minimum possible code or Doom parity.
+
+### Initial checkpoint
 
 - Share path resolution, tool checks, conversion, and output checks between
   the two PowerShell entry points. Their command-line options stay the same.
