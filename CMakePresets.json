@@ -1,0 +1,17 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "clang",
+      "displayName": "Clang C23 / Ninja",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    }
+  ],
+  "buildPresets": [{ "name": "clang", "configurePreset": "clang" }],
+  "testPresets": [{ "name": "clang", "configurePreset": "clang", "output": { "outputOnFailure": true } }]
+}

@@ -1,0 +1,11 @@
+/build*/
+*.wad
+*.WAD
+*.drmap
+*.DRMAP
+*.mid
+*.MID
+*.mus
+*.MUS
+/artifacts/
+__pycache__/
