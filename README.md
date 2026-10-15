@@ -5,6 +5,17 @@ tool turns any original `DOOM2.WAD` level (MAP01..MAP32) into a `.drmap`
 scene and its original music into a `.mid` file. The viewer reads
 only the prepared scene: it has no WAD parser or tessellator.
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=mFpq7nEeMTU">
+    <img
+      src="https://img.youtube.com/vi/mFpq7nEeMTU/hqdefault.jpg"
+      alt="MAP07: Doom 2 Vulkan + DLSS5 render rewrite"
+      width="640"
+    />
+  </a>
+</p>
+
+
 ## Build and run
 
 Need CMake 3.28+, Ninja, Git, Clang 19+, and the Vulkan SDK with `glslc`.
