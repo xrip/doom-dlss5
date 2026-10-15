@@ -1,5 +1,50 @@
 # YAGNI, KISS, and DRY review
 
+## Current Vulkan and sprite checkpoint
+
+Reviewed the pending Vulkan/NGX renderer, presentation worker, shaders,
+CMake setup, live controls, HUD, sprite conversion/playback, tests, tools,
+and documentation. Also reviewed the preceding map-interaction commit
+`27a104e` for repeated logic and unnecessary state.
+
+- Removed the unused renderer validation flag and stored sprite shade.
+  Sprite light comes from the live owner sector; DRMAP006 stores no duplicate shade.
+- Removed an unused FG device argument and create values ignored by the SDK helper.
+- FG-off frames skip the HUDless copy. Swapchain mode comes from the live
+  FG state and the explicit no-VSync choice, rather than a stale cached flag.
+- Shared the existing trigger enum between doors and sector movers and
+  reused the existing line-side calculation. No new action framework.
+- Shared the two identical NR runtime-copy steps in CMake.
+- Kept Vulkan barriers, FG presentation pacing, and NGX callback workarounds:
+  they serve validated resource lifetimes and SDK behavior. The compiled
+  fragment shader contains `OpDemoteToHelperInvocation`, so its required
+  device feature remains enabled.
+- Kept sprite animation as a small converter table plus the existing 35 Hz
+  clock. No actor framework, combat states, or WAD reads in the renderer.
+- Fixed the window test's PowerShell 5 exit-code handling and cleanup of
+  its own failed test process tree.
+
+Defaults match the requested screenshot: NR enabled, style 1, two passes,
+FG disabled, and ray lighting enabled. SR stays in performance mode.
+Existing key controls and command-line overrides remain available.
+
+Final checks: the Clang build and all 23 CTest checks pass, including all
+32 maps through the GPU variants. A fresh C-only build without NGX/FG
+passes all 14 checks. Maximize/minimize/restore/close passes with Vulkan
+synchronization validation on PowerShell 5 and 7. Default and explicitly
+selected screenshot settings produce byte-identical PNG captures.
+
+An existing behavior edge needs a separate focused check: player-sector
+contact uses the radius across neighboring linedefs without checking the
+blocking flag. It can affect mover/door obstruction near a solid shared
+wall. This review does not change that collision rule.
+
+The next lighting task covers AI ray tracing, sprite
+shadows, and light sources from bright sectors and glowing sprites.
+Those features are outside this checkpoint.
+
+## Historical initial review
+
 This is the historical review for the initial checkpoint. Later floor/lift
 support shares controls in `src/specials.c` and `src/sector_movers.c` and
 uses DRMAP005. This report's older paths and format checks remain historical.

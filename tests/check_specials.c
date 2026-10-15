@@ -22,6 +22,31 @@ static Player front_player(const Scene *scene, const CollisionLine *line, float 
         .sector = line->front, .view_height = PLAYER_EYE, .health = 100};
 }
 
+static void sprite_animation(void) {
+    Sprite sprites[] = {
+        {.asset = 3, .frame_count = 3, .frame_ticks = 6,
+         .frames = {{.asset = 3, .ticks = 6}, {.asset = 4, .ticks = 4, .fullbright = true},
+                    {.asset = 5, .ticks = 2}}},
+        {.asset = 7},
+        {.asset = 8, .hidden = true, .frame_count = 2, .frame_ticks = 1,
+         .frames = {{.asset = 8, .ticks = 1}, {.asset = 9, .ticks = 1}}}
+    };
+    Scene scene = {.sprites = sprites, .sprite_count = 3};
+    Specials specials = specials_create(&scene);
+    ticks(&scene, &specials, NULL, 5);
+    expect(sprites[0].asset == 3 && sprites[0].frame_ticks == 1, "first sprite frame lasts six ticks");
+    ticks(&scene, &specials, NULL, 1);
+    expect(sprites[0].asset == 4 && sprites[0].fullbright && sprites[0].frame_ticks == 4,
+           "sprite frame changes asset, duration, and light together");
+    ticks(&scene, &specials, NULL, 4);
+    expect(sprites[0].asset == 5 && !sprites[0].fullbright, "next sprite frame restores sector lighting");
+    ticks(&scene, &specials, NULL, 2);
+    expect(sprites[0].asset == 3 && sprites[0].frame_index == 0 && sprites[0].frame_ticks == 6,
+           "sprite animation wraps to its first frame");
+    expect(sprites[1].asset == 7 && sprites[2].asset == 8, "static and hidden sprites do not advance");
+    specials_free(&specials);
+}
+
 static void synthetic(void) {
     SceneSector sectors[] = {{.ceiling = 8, .light = 128}, {.ceiling = 8, .light = 64, .special = 9},
                              {.floor = 2, .ceiling = 8, .light = 192, .tag = 9}};
@@ -196,6 +221,7 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[2], "--coverage")) coverage(argv[1]);
     else {
         if (argc > 3) fail("Usage: check-specials [MAP01.drmap [snapshot-prefix]] | MAPxx.drmap --coverage");
+        sprite_animation();
         synthetic();
         if (argc >= 2) map01(argv[1], argc == 3 ? argv[2] : NULL);
     }

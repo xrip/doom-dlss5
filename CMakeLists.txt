@@ -8,28 +8,38 @@ set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+option(DOOM_DLSS5 "Build the DLSS 5 neural-rendering adapter" OFF)
+option(DOOM_FRAME_GENERATION "Build direct NGX Vulkan frame generation" OFF)
+if(DOOM_FRAME_GENERATION AND NOT DOOM_DLSS5)
+    message(FATAL_ERROR "Frame generation uses the NGX bridge; enable DOOM_DLSS5")
+endif()
+set(DLSS5_SDK "" CACHE PATH "NVIDIA public NGX SDK root")
+set(DLSS5_RUNTIME "" CACHE FILEPATH "Path to the matching nvngx_dlssnr.dll runtime")
+if(DOOM_DLSS5)
+    if(NOT EXISTS "${DLSS5_SDK}/include/nvsdk_ngx_vk.h")
+        message(FATAL_ERROR "Set DLSS5_SDK to the public NVIDIA/DLSS checkout containing include/nvsdk_ngx_vk.h")
+    endif()
+    if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "The DLSS 5 adapter currently targets Windows x64")
+    endif()
+    if(NOT EXISTS "${DLSS5_RUNTIME}")
+        message(FATAL_ERROR "Set DLSS5_RUNTIME to the matching nvngx_dlssnr.dll; it is separate from the public SDK")
+    endif()
+endif()
+
 include(FetchContent)
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(CUSTOMIZE_BUILD ON CACHE BOOL "" FORCE)
-set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "" FORCE)
-foreach(feature SUPPORT_CUSTOM_FRAME_CONTROL SUPPORT_CAMERA_SYSTEM SUPPORT_GESTURES_SYSTEM
-        SUPPORT_MOUSE_GESTURES SUPPORT_AUTOMATION_EVENTS SUPPORT_COMPRESSION_API
-        SUPPORT_CLIPBOARD_IMAGE SUPPORT_GPU_SKINNING SUPPORT_MESH_GENERATION
-        SUPPORT_FILEFORMAT_OBJ SUPPORT_FILEFORMAT_MTL SUPPORT_FILEFORMAT_IQM
-        SUPPORT_FILEFORMAT_GLTF SUPPORT_FILEFORMAT_VOX SUPPORT_FILEFORMAT_M3D
-        SUPPORT_FILEFORMAT_BMP SUPPORT_FILEFORMAT_TGA SUPPORT_FILEFORMAT_JPG
-        SUPPORT_FILEFORMAT_GIF SUPPORT_FILEFORMAT_QOI SUPPORT_FILEFORMAT_PSD
-        SUPPORT_FILEFORMAT_DDS SUPPORT_FILEFORMAT_HDR SUPPORT_FILEFORMAT_PIC
-        SUPPORT_FILEFORMAT_PNM SUPPORT_FILEFORMAT_KTX SUPPORT_FILEFORMAT_ASTC
-        SUPPORT_FILEFORMAT_PKM SUPPORT_FILEFORMAT_PVR SUPPORT_FILEFORMAT_TTF
-        SUPPORT_FILEFORMAT_FNT SUPPORT_FILEFORMAT_BDF SUPPORT_IMAGE_GENERATION)
-    set(${feature} OFF CACHE BOOL "" FORCE)
-endforeach()
-set(OPENGL_VERSION 3.3 CACHE STRING "" FORCE)
-FetchContent_Declare(raylib
-    GIT_REPOSITORY https://github.com/raysan5/raylib.git
-    GIT_TAG dbc56a87da87d973a9c5baa4e7438a9d20121d28)
-FetchContent_MakeAvailable(raylib)
+find_package(Vulkan 1.3 REQUIRED COMPONENTS glslc)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG a74efa0d5628b74adc0426af4c5710e287fa7c2c)
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
+FetchContent_MakeAvailable(glfw stb)
 FetchContent_Declare(libtess2
     GIT_REPOSITORY https://github.com/memononen/libtess2.git
     GIT_TAG 8dbd6483e920311a58c9af10a10beb278efebc36)
@@ -61,8 +71,89 @@ add_executable(check-music tests/check_music.c)
 target_link_libraries(check-music PRIVATE mus)
 add_executable(wad-convert src/convert.c)
 target_link_libraries(wad-convert PRIVATE scene tess2 mus)
+add_library(renderer STATIC src/renderer.c)
+target_link_libraries(renderer PUBLIC movement glfw Vulkan::Vulkan)
+target_include_directories(renderer SYSTEM PRIVATE ${stb_SOURCE_DIR})
+target_compile_definitions(renderer PUBLIC GLFW_INCLUDE_NONE)
+target_include_directories(renderer PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 add_executable(doom-raylib src/main.c)
-target_link_libraries(doom-raylib PRIVATE movement music raylib)
+target_link_libraries(doom-raylib PRIVATE renderer music)
+if(DOOM_DLSS5 OR DOOM_FRAME_GENERATION)
+    if(NOT DEFINED CMAKE_CXX_COMPILER)
+        set(CMAKE_CXX_COMPILER clang++ CACHE STRING "Clang C++ compiler for the NGX bridge")
+    endif()
+    enable_language(CXX)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "Use Clang++ for the NGX bridge")
+    endif()
+endif()
+if(DOOM_DLSS5)
+    find_library(DLSS5_NGX_LIBRARY NAMES nvsdk_ngx_d
+        PATHS "${DLSS5_SDK}/lib/Windows_x86_64/x64" NO_DEFAULT_PATH REQUIRED)
+    find_library(DLSS5_NGX_DEBUG_LIBRARY NAMES nvsdk_ngx_d_dbg
+        PATHS "${DLSS5_SDK}/lib/Windows_x86_64/x64" NO_DEFAULT_PATH REQUIRED)
+    find_file(DLSS5_SR_RUNTIME NAMES nvngx_dlss.dll
+        PATHS "${DLSS5_SDK}/lib/Windows_x86_64/rel" NO_DEFAULT_PATH REQUIRED)
+    add_library(dlss5 STATIC src/dlss5.cpp)
+    target_compile_features(dlss5 PRIVATE cxx_std_17)
+    target_include_directories(dlss5 SYSTEM PRIVATE "${DLSS5_SDK}/include")
+    target_compile_definitions(dlss5 PRIVATE DOOM_DLSS5 _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(dlss5 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    target_link_libraries(dlss5 PUBLIC Vulkan::Vulkan
+        optimized ${DLSS5_NGX_LIBRARY} debug ${DLSS5_NGX_DEBUG_LIBRARY})
+    target_link_libraries(renderer PRIVATE dlss5)
+    target_compile_definitions(renderer PUBLIC DOOM_DLSS5)
+    function(copy_dlss_runtime target directory)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${directory}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DLSS5_RUNTIME}" "${directory}/nvngx_dlssnr.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DLSS5_SR_RUNTIME}" "${directory}/nvngx_dlss.dll"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:${target}> "${directory}/nvngx.dll"
+            VERBATIM)
+    endfunction()
+    copy_dlss_runtime(doom-raylib "$<TARGET_FILE_DIR:doom-raylib>")
+endif()
+if(DOOM_FRAME_GENERATION)
+    find_file(DLSS5_FG_RUNTIME NAMES nvngx_dlssg.dll
+        PATHS "${DLSS5_SDK}/lib/Windows_x86_64/rel" NO_DEFAULT_PATH REQUIRED)
+    add_library(frame-generation STATIC src/frame_generation.cpp src/presentation.c)
+    target_compile_features(frame-generation PRIVATE cxx_std_17)
+    target_include_directories(frame-generation SYSTEM PRIVATE "${DLSS5_SDK}/include")
+    target_compile_definitions(frame-generation PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(frame-generation PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    target_link_libraries(frame-generation PUBLIC dlss5)
+    target_link_libraries(renderer PRIVATE frame-generation)
+    target_compile_definitions(renderer PUBLIC DOOM_FRAME_GENERATION)
+    function(copy_fg_runtime target directory)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${directory}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DLSS5_FG_RUNTIME}"
+                "${directory}/nvngx_dlssg.dll"
+            VERBATIM)
+    endfunction()
+    copy_fg_runtime(doom-raylib "$<TARGET_FILE_DIR:doom-raylib>")
+endif()
+set(render_shader_outputs)
+foreach(shader vulkan.vert vulkan.frag hud.vert hud.frag)
+    list(APPEND render_shader_outputs ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.inc)
+    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.inc
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+        COMMAND Vulkan::glslc --target-env=vulkan1.3 -mfmt=num
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${shader}
+            -o ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.inc
+        DEPENDS src/shaders/${shader}
+        VERBATIM)
+endforeach()
+list(APPEND render_shader_outputs ${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan-ray.frag.inc)
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan-ray.frag.inc
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+    COMMAND Vulkan::glslc --target-env=vulkan1.3 -DRAY_LIGHTING -mfmt=num
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/vulkan.frag
+        -o ${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan-ray.frag.inc
+    DEPENDS src/shaders/vulkan.frag src/shaders/lighting.glsl
+    VERBATIM)
+add_custom_target(vulkan-shaders DEPENDS ${render_shader_outputs})
+add_dependencies(renderer vulkan-shaders)
 add_executable(check-movement tests/check_movement.c)
 target_link_libraries(check-movement PRIVATE movement)
 add_executable(check-doors tests/check_doors.c)
@@ -73,7 +164,7 @@ add_executable(check-specials tests/check_specials.c)
 target_link_libraries(check-specials PRIVATE movement)
 add_executable(check-movers tests/check_movers.c)
 target_link_libraries(check-movers PRIVATE movement)
-foreach(target scene movement mus music mus-convert check-music wad-convert doom-raylib check-movement check-doors check-floors check-specials check-movers)
+foreach(target scene movement mus music renderer mus-convert check-music wad-convert doom-raylib check-movement check-doors check-floors check-specials check-movers)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     if(WIN32)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -84,6 +175,42 @@ if(NOT WIN32)
 endif()
 
 enable_testing()
+option(DOOM_GPU_TESTS "Run Vulkan GPU tests (requires a GPU, validation layer, and local DOOM2.WAD)" OFF)
+if(DOOM_GPU_TESTS)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD")
+        message(FATAL_ERROR "DOOM_GPU_TESTS requires local DOOM2.WAD")
+    endif()
+    add_executable(check-renderer tests/check_renderer.c)
+    target_link_libraries(check-renderer PRIVATE renderer)
+    if(DOOM_FRAME_GENERATION)
+        copy_fg_runtime(check-renderer "$<TARGET_FILE_DIR:check-renderer>")
+    endif()
+    target_compile_options(check-renderer PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    if(WIN32)
+        target_compile_definitions(check-renderer PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME vulkan-renderer COMMAND check-renderer ${CMAKE_CURRENT_BINARY_DIR}/MAP01.drmap)
+    add_test(NAME vulkan-ray-lighting COMMAND check-renderer ${CMAKE_CURRENT_BINARY_DIR}/MAP01.drmap --ray-lighting)
+    set_tests_properties(vulkan-ray-lighting PROPERTIES ENVIRONMENT "VK_VALIDATION_VALIDATE_SYNC=1")
+    set_tests_properties(vulkan-renderer PROPERTIES ENVIRONMENT
+        "VK_VALIDATION_VALIDATE_SYNC=1")
+    if(DOOM_DLSS5)
+        copy_dlss_runtime(check-renderer "$<TARGET_FILE_DIR:check-renderer>/nr-check")
+        add_test(NAME vulkan-dlss5 COMMAND $<TARGET_FILE_DIR:check-renderer>/nr-check/nvngx.dll
+            ${CMAKE_CURRENT_BINARY_DIR}/MAP01.drmap --dlss5)
+        if(DOOM_FRAME_GENERATION)
+            copy_fg_runtime(check-renderer "$<TARGET_FILE_DIR:check-renderer>/nr-check")
+            add_test(NAME vulkan-frame-generation COMMAND $<TARGET_FILE_DIR:check-renderer>/nr-check/nvngx.dll
+                ${CMAKE_CURRENT_BINARY_DIR}/MAP01.drmap --dlss5 --fg)
+            set_tests_properties(vulkan-frame-generation PROPERTIES ENVIRONMENT "VK_VALIDATION_VALIDATE_SYNC=1")
+            add_test(NAME vulkan-ray-neural COMMAND $<TARGET_FILE_DIR:check-renderer>/nr-check/nvngx.dll
+                ${CMAKE_CURRENT_BINARY_DIR}/MAP01.drmap --dlss5 --fg --ray-lighting)
+            set_tests_properties(vulkan-ray-neural PROPERTIES ENVIRONMENT "VK_VALIDATION_VALIDATE_SYNC=1")
+        endif()
+        set_tests_properties(vulkan-dlss5 PROPERTIES ENVIRONMENT
+            "VK_VALIDATION_VALIDATE_SYNC=1")
+    endif()
+endif()
 add_test(NAME geometry COMMAND wad-convert --self-test)
 add_test(NAME player-movement COMMAND check-movement)
 add_test(NAME mus-midi COMMAND check-music)
@@ -112,5 +239,35 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD")
         add_test(NAME doom2-all-levels COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_levels.py $<TARGET_FILE:wad-convert>
             $<TARGET_FILE:doom-raylib> ${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD $<TARGET_FILE:check-specials>)
+        if(DOOM_GPU_TESTS)
+            add_test(NAME doom2-vulkan-levels COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_levels.py $<TARGET_FILE:wad-convert>
+                $<TARGET_FILE:doom-raylib> ${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD
+                $<TARGET_FILE:check-specials> --render)
+            set_tests_properties(doom2-vulkan-levels PROPERTIES ENVIRONMENT
+                "VK_VALIDATION_VALIDATE_SYNC=1")
+            if(DOOM_DLSS5)
+                add_test(NAME doom2-neural-levels COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_levels.py $<TARGET_FILE:wad-convert>
+                    $<TARGET_FILE:doom-raylib> ${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD
+                    $<TARGET_FILE:check-specials> --render --dlss5)
+                set_tests_properties(doom2-neural-levels PROPERTIES ENVIRONMENT
+                    "VK_VALIDATION_VALIDATE_SYNC=1")
+                if(DOOM_FRAME_GENERATION)
+                    add_test(NAME doom2-frame-generation-levels COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_levels.py $<TARGET_FILE:wad-convert>
+                        $<TARGET_FILE:doom-raylib> ${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD
+                        $<TARGET_FILE:check-specials> --render --dlss5 --fg)
+                    set_tests_properties(doom2-frame-generation-levels PROPERTIES ENVIRONMENT
+                        "VK_VALIDATION_VALIDATE_SYNC=1")
+                    add_test(NAME doom2-ray-neural-levels COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_levels.py $<TARGET_FILE:wad-convert>
+                        $<TARGET_FILE:doom-raylib> ${CMAKE_CURRENT_SOURCE_DIR}/DOOM2.WAD
+                        $<TARGET_FILE:check-specials> --render --dlss5 --fg --ray-lighting)
+                    set_tests_properties(doom2-ray-neural-levels PROPERTIES ENVIRONMENT
+                        "VK_VALIDATION_VALIDATE_SYNC=1")
+                endif()
+            endif()
+        endif()
     endif()
 endif()

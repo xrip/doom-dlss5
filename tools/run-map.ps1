@@ -12,7 +12,13 @@ param(
 
     [switch]$NoMusic,
 
-    [switch]$AllKeys
+    [switch]$AllKeys,
+
+    [switch]$Dlss5,
+
+    [switch]$FrameGeneration,
+
+    [switch]$RayLighting
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +32,9 @@ try {
     $viewerArguments = @($scenePath)
     if ($NoMusic) { $viewerArguments += '--no-music' }
     if ($AllKeys) { $viewerArguments += '--all-keys' }
+    if ($Dlss5 -or $FrameGeneration) { $viewerArguments += '--dlss5' }
+    if ($FrameGeneration) { $viewerArguments += '--fg' }
+    if ($RayLighting) { $viewerArguments += '--ray-lighting' }
     & $paths.Viewer @viewerArguments
     exit $LASTEXITCODE
 } catch {

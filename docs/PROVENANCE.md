@@ -5,11 +5,18 @@ engine source or renderer port source was used to write this PoC.
 
 - [Kaitai Doom WAD format](https://github.com/kaitai-io/kaitai_struct_formats/blob/master/game/doom_wad.ksy): WAD directory, classic map records, PNAMES, and texture descriptions.
 - [Doom Wiki picture format](https://doomwiki.org/wiki/Picture_format): column posts, patch offsets, and gaps.
+- [WhackEd4 Doom 1.9 editor tables](https://github.com/GitExl/WhackEd4/blob/ebe673c4ef5c98b6e68f5d2dc703aee542dc795f/cfg/tables_doom19.json): factual map-thing spawn frame sequences, tic durations, and fullbright bits. Only editor data was consulted; playback is independently written.
 - [Doom Wiki sidedef](https://doomwiki.org/wiki/Sidedef): texture offsets and surface types.
 - [Doom Wiki linedef](https://doomwiki.org/wiki/Linedef): sidedef links and pegging flags.
 - [Doom Wiki COLORMAP](https://doomwiki.org/wiki/COLORMAP): palette-index light tables.
 - [Doom Wiki sky](https://doomwiki.org/wiki/Sky): F_SKY1 and sky boundaries.
-- [raylib 6.0 API](https://github.com/raysan5/raylib/blob/6.0/src/raylib.h): meshes, textures, shaders, camera, window, and screenshots.
+- [raylib 6.0 API](https://github.com/raysan5/raylib/blob/6.0/src/raylib.h): the original renderer, replaced by the native Vulkan renderer.
+- [Vulkan specification](https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html): GPU resources, rendering, and synchronization.
+- [GLFW](https://www.glfw.org/docs/latest/): windows, input, and Vulkan surfaces.
+- [stb](https://github.com/nothings/stb): PNG screenshots and HUD text.
+- [NVIDIA public NGX SDK](https://github.com/NVIDIA/DLSS/tree/374959484e79a640feaba44c93ac8cfb0a03f5b5): Vulkan resources, parameter API, and custom project identification.
+- [bevy_dlss5](https://github.com/AlrikOlson/bevy_dlss5/tree/28be5dc1b4b907ddba63a0c73d531e629809a865): discovered NR Vulkan exports, runtime initialization, and parameter keys. The C++ adapter is independently written against that call contract.
+- [Measured NR controls](https://github.com/Echo-Storm/ls-addon-manager/blob/main/addons/DLSS5NR01/docs/dlssnr-knobs.md): observed style, structure, mask, and repeated-pass behavior for runtime 310.8.
 - [libtess2](https://github.com/memononen/libtess2): sector contour tessellation, used only by the converter.
 - [The Unofficial Doom Specs, chapter 4](https://github.com/nukeop/TheUnofficialDoomSpecs/blob/master/Chapter4.md): player dimensions, floor step limit, linedef flags, sector IDs, specials, and tags.
 - [Doom Builder guide](https://www.doombuilder.com/files/doombuilder1guide.pdf): door actions and key colors.
@@ -25,7 +32,13 @@ are project designs. Visual similarity does not mean exact original
 render behavior. This note records sources; it is not a claim of a
 formally separated clean-room process.
 
-Dependencies are pinned in CMake: raylib tag 6.0 at
-`dbc56a87da87d973a9c5baa4e7438a9d20121d28`, and libtess2 at
+Direct lighting uses Vulkan ray queries as described by the
+[Khronos GLSL ray-query extension](https://github.khronos.org/Vulkan-Site/glslext/latest/glslext/ext/GLSL_EXT_ray_query.html).
+The lights are project-derived approximations of Doom sector lighting,
+not copied authored light entities or an original Doom lighting algorithm.
+
+Dependencies are pinned in CMake: GLFW 3.4 at
+`a74efa0d5628b74adc0426af4c5710e287fa7c2c`, stb at
+`2c980bb59875b0d32144a71867fbdebb2f77cd20`, and libtess2 at
 `8dbd6483e920311a58c9af10a10beb278efebc36`. Their license files remain
 in the downloaded source trees under `build/_deps`.

@@ -107,7 +107,10 @@ def collision_start(data):
     for _ in range(batches):
         count = struct.unpack_from("<I", data, offset + 12)[0]
         offset += 24 + count * 20
-    return offset + sprites * 28
+    for _ in range(sprites):
+        frames = struct.unpack_from("<I", data, offset + 24)[0]
+        offset += 28 + frames * 12
+    return offset
 
 
 def main():
@@ -124,7 +127,7 @@ def main():
         result = run([viewer, str(scene), "--inspect"])
         assert "12 triangles, 0 sprites" in result.stdout
         good_scene = scene.read_bytes()
-        assert good_scene[:8] == b"DRMAP005"
+        assert good_scene[:8] == b"DRMAP006"
         asset_count, batch_count, sprite_count = struct.unpack_from("<III", good_scene, 16)
         assert (asset_count, batch_count, sprite_count) == (2, 3, 0)
         offset = 44 + 32768
@@ -148,16 +151,25 @@ def main():
         bottle_patch += bytes([0, 4, 0, 1, 2, 3, 4, 0, 255, 0, 4, 0, 5, 6, 7, 8, 0, 255])
         bottle_lumps = [(key, contents + struct.pack("<hhHHH", 96, 64, 0, 2014, 7) if key == "THINGS" else contents)
                         for key, contents in lumps]
-        bottle_lumps.append(("BON1A0", bottle_patch))
+        bottle_lumps.extend((f"BON1{frame}0", bottle_patch) for frame in "ABCD")
         wad.write_bytes(make_wad(bottle_lumps))
         bottle_scene = root / "bottle.drmap"
         run([converter, str(wad), str(bottle_scene)])
         data = bottle_scene.read_bytes()
-        sprite_offset = collision_start(data) - 28
-        assert struct.unpack_from("<II", data, sprite_offset + 8) == (0, 0)
-        assert struct.unpack_from("<f", data, sprite_offset + 20)[0] == 2 / 32
+        sprite_offset = collision_start(data) - (28 + 6 * 12)
+        assert struct.unpack_from("<II", data, sprite_offset + 4) == (0, 0)
+        assert struct.unpack_from("<f", data, sprite_offset + 16)[0] == 2 / 32
+        assert struct.unpack_from("<I", data, sprite_offset + 24)[0] == 6
+        frames = [struct.unpack_from("<III", data, sprite_offset + 28 + frame * 12) for frame in range(6)]
+        assert [frame[0] for frame in frames] == [frames[index][0] for index in (0, 1, 2, 3, 2, 1)]
+        assert len({frame[0] for frame in frames}) == 4
+        assert all(frame[1:] == (6, 0) for frame in frames)
+        run([viewer, str(bottle_scene), "--inspect"])
         checks += 1
-        for field, value in ((sprite_offset + 8, 99), (sprite_offset + 12, 4)):
+        for field, value in ((sprite_offset + 4, 99), (sprite_offset + 8, 4),
+                             (sprite_offset + 24, 9), (sprite_offset + 28, 0xFFFFFFFF),
+                             (sprite_offset + 32, 0), (sprite_offset + 32, 351),
+                             (sprite_offset + 36, 2)):
             invalid = bytearray(data)
             struct.pack_into("<I", invalid, field, value)
             bottle_scene.write_bytes(invalid)

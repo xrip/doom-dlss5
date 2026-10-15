@@ -1,5 +1,36 @@
 # PoC validation
 
+## Reviewed Vulkan checkpoint
+
+The full Clang build passes all 23 CTest checks; the native-only C23 build
+passes all 14. The full suite includes conversion and Vulkan checks across
+all 32 Doom II levels. The window test passes maximize, minimize, restore,
+and clean close on Windows PowerShell 5 and PowerShell 7 with Vulkan
+synchronization validation enabled.
+
+Defaults are NR on, style 1, two passes, FG off, ray lighting on, and SR
+performance. A four-frame default capture matches the explicit settings
+byte for byte (`build/yagni-default.png`, `build/yagni-explicit.png`).
+The cleanup and review scope are recorded in [YAGNI-REVIEW.md](YAGNI-REVIEW.md).
+
+## Sprite animations (DRMAP006)
+
+The Clang build converts MAP01 to 93 textures and 43 sprites. All 110
+supported thing types were checked against the pinned WhackEd4 editor data:
+49 animated types share 47 spawn loops; 61 types have static spawn images.
+Frame order, individual durations, and fullbright bits match the data.
+
+Checks cover exact tick boundaries, unequal frame durations, loop wrap,
+hidden/static sprites, scene round trips, and invalid frame data. A GPU
+fixture checks that a frame change selects a different texture, returns to
+the original image after a full loop, and preserves motion history.
+All 32 Doom II maps convert and pass interaction coverage with DRMAP006.
+Native and combined NR/SR/FG/ray renderer checks pass Vulkan validation.
+All 32 maps also render with NR, SR, FG, and ray lighting together under
+Vulkan synchronization validation (`doom2-ray-neural-levels`).
+
+## Earlier checkpoints
+
 Checked on Windows with Clang 23.1.1, CMake, Ninja, and raylib 6.0.
 
 The local Doom II MAP01 converts to 84 textures, 191 mesh batches,
@@ -93,3 +124,294 @@ See [YAGNI-REVIEW.md](YAGNI-REVIEW.md) for the full file review and cleanup chec
 
 These checks establish a working viewer with world collision. They do not establish
 pixel-exact Doom lighting, sky projection, or gameplay behavior.
+
+## Native Vulkan migration (2026-10-14)
+
+Clang 23.1.1, Vulkan SDK 1.4.357.0, RTX 5060 Ti, driver 617.42:
+
+- The native build passes all 16 CTest checks with `DOOM_GPU_TESTS=ON`.
+  This includes rendering all 32 converted maps with synchronization
+  validation. The ordinary non-GPU suite remains 14 checks.
+- GPU motion readback checks static frames, camera motion, history reset,
+  moving MAP01 barriers/lift, HUD isolation, and resize. A sky-only scene
+  checks zero translation motion, rotation motion, and history reset.
+- MAP01 reference images from the previous renderer were compared at
+  1280x800. Spawn differs at 3 pixels, overview at 42, and the grate view
+  at 2094; the largest mean absolute RGB channel error is 0.027 on a
+  0..255 scale. These are visual migration checks, not Doom pixel parity.
+- `--motion` produced a valid float PFM with finite, exactly zero values
+  for a repeated static view. Captures are under `build/vulkan-*.png`.
+- A native-only build rejects `--dlss5` with exit code 1. NR builds now use
+  the public NGX SDK and the separately verified signed 310.8 runtime.
+  The earlier beta-header and assigned-application-ID gates were removed
+  after checking working community integrations.
+- The C++ NGX bridge has been compiled and run on the GPU above. The full
+  18-test suite passed, including actual NR evaluation on all 32 maps.
+  The normal launcher and a visible interactive run from `build` were
+  checked. The runtime filename workaround is handled by the launcher.
+
+Build and test logs: `build/vulkan-build.log`, `build/vulkan-tests.log`.
+See [VULKAN.md](VULKAN.md) for the SDK/runtime evidence and setup.
+
+### Presentation and billboard regressions
+
+The initial migration checks compared offscreen images and missed a second
+sRGB encode during presentation. A new dark two-color sprite fixture first
+failed the expected palette-color check; after correcting the surface
+format it failed the left/right orientation check. Correcting the sign of
+the sprite's Z rotation made both checks pass.
+
+Color readback now uses the same blit operation and destination format as
+presentation, then converts BGRA byte order to RGBA for screenshots/tests.
+The fixture checks exact palette values and sprite size/orientation around
+an eight-angle camera orbit. The full 16-test suite passes with these checks
+and synchronization validation. Logs of the failing and passing runs are
+`build/vulkan-regression-before.log`, `build/vulkan-regression-color-fixed.log`,
+and `build/vulkan-regression-fixed.log`.
+
+### Super Resolution integration
+
+The SR path uses a separate NGX feature, input-resolution color/depth/motion,
+display-resolution output, and a display-resolution HUD. The 310.9.1 SR
+runtime initially produced two synchronization validation errors for SDK
+image clears. An NGX Vulkan callback now supplies the missing write-to-clear
+dependency; validation remains enabled. Shutdown ordering also releases
+the SDK's resources before shutting down the direct NR snippet.
+
+`build/sr-callback.log` records 32 frames with NR and SR evaluation and exit
+code zero. `build/sr-regression.log` records all 18 tests passing, including
+rendering all 32 Doom II maps with NR and default performance SR.
+`build/sr-mode-tests.log` records the expanded GPU test passing quality,
+balanced, and performance modes, with full-size output, resize while NR is
+off, and NR resuming after resize. These tests enable synchronization
+validation; they do not prove temporal image quality during gameplay.
+
+Isolated MAP01 timing on RTX 5060 Ti, 3840x2160, one NR pass, 240 frames
+(16 warm-up frames excluded), validation on, no captures or other game
+instance running:
+
+| SR mode | Render size | Frame time | GPU NR | GPU SR stage |
+| --- | --- | --- | --- | --- |
+| Off | 3840x2160 | 34.482 ms | 30.917 ms | 0.085 ms (copy) |
+| Performance | 1920x1080 | 16.679 ms | 8.596 ms | 3.965 ms |
+| Quality | 2560x1440 | 19.801 ms | 13.719 ms | 2.833 ms |
+
+All runs exited zero with synchronization validation enabled. Performance
+mode reaches the current presentation limit near 60 FPS; these are rendered
+frames, not generated frames. Logs: `build/sr-4k-clean-off.log`,
+`build/sr-4k-clean-performance.log`, and `build/sr-4k-clean-quality.log`.
+Runs with PNG captures or a second game instance are not comparable to
+these measurements.
+
+`build/sr-temporal-tests.log` adds a 32-frame camera translation followed by
+a camera cut back to the same MAP01 spawn view and 32 settling frames.
+Mean absolute RGBA replay differences (0..255 units) were 0.000 for quality,
+0.000 for balanced, and 0.116 for performance; all are below the test's
+1.0-unit reset threshold. Static views over another 32-frame jitter cycle
+differed by 0.623, 1.420, and 0.274 respectively. This checks history reset
+and quantifies static changes; it is not a full moving-image quality test.
+
+A separate `DOOM_DLSS5=OFF` build in `build/native-check` also passed all
+14 non-GPU tests and a 32-frame MAP01 Vulkan validation smoke run.
+Logs: `build/native-check-build.log`, `build/native-check-tests.log`,
+and `build/native-check-smoke.log`.
+
+### Frame generation bring-up
+
+This section records the earlier Streamline trial, now replaced by direct
+NGX evaluation and an application-owned presentation worker.
+
+The official Streamline 2.14.1 x64 release package is staged locally under
+`build/_deps/streamline-sdk-2.14.1`. Authenticode checks passed for
+`sl.interposer.dll`, `sl.common.dll`, `sl.reflex.dll`, `sl.dlss_g.dll`, and
+`nvngx_dlssg.dll`. Windows reports hardware scheduling enabled (`HwSchMode=2`).
+
+The local `build/fg_probe.cpp` smoke probe links the Streamline interposer
+instead of the Vulkan loader. With the project's custom GUID it reports
+successful Streamline init, Vulkan 1.3 instance and device creation, FG and
+Reflex support on RTX 5060 Ti, and shutdown. `build/fg-probe-device.log`
+records the result. The probe uses a minimal local runtime folder, but the
+NGX driver cache is also active, so this is not proof of an offline install.
+
+This proves API/device compatibility only. It does not generate frames or
+prove coexistence with direct NGX SR/NR. Engine integration, Reflex timing,
+HUD-less inputs, resize handling, and actual presented-frame counts still
+need validation before claiming FG works.
+
+The experimental engine build is under `build/fg-check`, with
+`DOOM_FRAME_GENERATION=ON` and the local Streamline package. The default
+build still has FG disabled. The engine now routes GLFW surface creation
+through the interposer, supplies depth/motion/HUD-less inputs and Reflex
+markers, and queries FG state per presented application frame. Direct NGX
+NR/SR releases its features first but leaves final NGX core shutdown to
+Streamline; shutting the shared core down twice caused a crash.
+
+FG-only and combined NR/SR/FG finite runs reach rendering and clean exit
+without validation. This is not validation-clean: SDK-owned fake-swapchain
+images, clear/copy/fill commands, and pacer semaphores still produce errors.
+Logs: `build/fg-input-fixes.log`, `build/fg-shared-owner.log`. These errors
+remain visible; FG is not yet a supported release mode.
+
+### Window state regression
+
+`tests/check_window.ps1` starts its own engine process and sends real
+`WM_SYSCOMMAND` maximize, restore, minimize, and restore commands twice,
+then sends `WM_CLOSE` and requires exit code zero. It checks actual window
+state, not only process survival, and does not target another game window.
+
+```powershell
+./tests/check_window.ps1 -Exe ./build/doom-raylib.exe -Scene ./build/MAP01.drmap `
+    -Modes @('--dlss5', '--validation') -Log ./build/window-sr
+./tests/check_window.ps1 -Exe ./build/fg-check/doom-raylib.exe -Scene ./build/fg-check/MAP01.drmap `
+    -Log ./build/window-fg
+```
+
+NR+SR passed with synchronization validation enabled
+(`build/maximize-sr-validation-test.log`). FG+NR+SR passed without validation
+(`build/maximize-fg-fixed-test.log`); this does not waive the FG validation
+faults above. The resize fix ends unsubmitted FG tokens before rebuilding
+the swapchain, disables FG during recreation, and starts fresh history
+afterward. Finite tests can use `--visible` to exercise a real window.
+
+The same FG+NR+SR test also passed ten full cycles (40 window-state
+commands), followed by clean close: `build/window-fg-stress-test.log`.
+Use `-Cycles 10` to repeat this stress check. Validation was off for this
+run; it proves survival of these window changes, not absence of SDK faults.
+
+### FG runtime update comparison
+
+Matching 60-frame NR+SR+FG runs were tested with synchronization validation
+and either local Streamline 2.14.1 plugins or NVIDIA's signed NGX cached
+plugins (version directory `134672`, including PCL 2.14.16). Both rendered
+60 frames and reported 120 presentations, then exited with validation
+failure: 37 errors for local plugins, 39 for cached plugins. Counts include
+duplicate-message limits and thread timing differences, so the two-error
+difference is not a quality or stability score. Both retain the same core
+fake-image layout, copy, clear, and pacer semaphore faults.
+
+The cached-plugin experiment was reverted; the bridge uses the specified
+local package again. Logs: `build/fg-local-validation.log` and
+`build/fg-ota-validation.log`. Similar errors remain open in NVIDIA's
+[issue 84](https://github.com/NVIDIA-RTX/Streamline/issues/84) and
+[issue 112](https://github.com/NVIDIA-RTX/Streamline/issues/112).
+
+A separate visible 4K performance run with NR, performance SR, and 2x FG
+rendered 240 application frames and reported 480 presentations (SDK status
+zero). After 16 warm-up frames, mean application-frame time was 18.279 ms;
+GPU NR took 9.510 ms and SR 4.313 ms. This is about 54.7 rendered FPS.
+The SDK presentation count is not an independent measurement of monitor
+scanout or frame pacing. Validation was off, and the known SDK faults still
+apply. Log: `build/fg-4k-performance.log`.
+
+### Direct NGX FG feasibility
+
+An isolated headless probe under `build/fg-direct-probe` links native Vulkan
+and the public NGX SDK, without Streamline. The first run created the FG
+feature but reported ten buffer-device-address feature-enable errors.
+After querying and enabling that required Vulkan feature, creation passed
+with zero validation errors (`build/fg-direct-probe/create-bda.log`).
+
+The SDK requested `VK_KHR_get_physical_device_properties2`,
+`VK_NVX_binary_import`, `VK_NVX_image_view_handle`,
+`VK_KHR_buffer_device_address`, and `VK_KHR_push_descriptor`.
+All were available on the RTX 5060 Ti. This proves feature creation only;
+evaluation, generated pixels, pacing, and integration remain unverified.
+The engine has not switched FG backends.
+
+Before a backend change, the current default build again passed all 18
+tests (`build/pre-direct-regression.log`). The all-map neural test now
+requires both the NR and SR evaluation markers, not only the NR marker.
+That stronger check passed separately for all 32 maps with Vulkan
+validation (`build/all-map-nr-sr-explicit.log`).
+
+### Direct FG engine validation
+
+The engine now uses direct NGX FG and a native C23 presentation worker,
+not Streamline. The probe's transfer dependencies and scoped image-layout
+initialization were applied through NGX's Vulkan callbacks. All four probe
+hashes stayed identical while errors went from 27 to zero
+(`build/fg-direct-probe/evaluate-layout-fixed.log`).
+
+The first engine run found a host-access race between acquire and present.
+Both swapchain APIs now share a lock; acquisition is nonblocking under that
+lock and waits outside it, so the presentation worker can release images.
+A 64-frame run then passed synchronization validation with 64 real and 63
+generated presentations (`build/direct-fg-serialized.log`). Reset and
+skipped frames are not counted as generated.
+
+All 20 tests passed in `build/direct-fg-full-tests.log`, including FG on all
+32 maps with real/generated presentation-count checks. The GPU regression
+also covers camera movement, map movers, sky, mode changes, resize, and all
+three SR modes. Generated-image readback differs from real moving frames
+by mean RGBA values 1.319, 1.373, and 0.963 for quality, balanced, and
+performance SR (`build/direct-fg-readback-test.log`). This confirms non-copy
+game output, not just SDK success or an FPS multiplier.
+
+Two maximize/minimize/restore cycles and clean close pass with NR+SR+FG
+and synchronization validation enabled (`build/window-direct-fg-test.log`).
+
+A separate visible 4K run rendered 240 frames and successfully presented
+240 real plus 239 generated frames. Mean application frame time after
+16 warm-up frames was 17.278 ms (about 57.9 rendered FPS). GPU NR was
+8.115 ms, SR 3.920 ms, and the combined HUD/FG stage 3.798 ms.
+Validation was off for this timing run; no captures or other GPU tests ran
+at the same time. These are presentation-call counts, not measured monitor
+scanout. Log: `build/direct-fg-4k.log`.
+
+The FG DLL from the pinned public SDK is byte-identical to the earlier
+probe runtime and has SHA-256
+`ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82`.
+
+### Ray-query lighting
+
+The RTX 5060 Ti reports ray query, acceleration structure, shader int64,
+runtime descriptor array, and nonuniform sampled-image support. Its scratch
+address alignment is 128 bytes; the renderer queries it rather than assuming
+an alignment. The optional lighting stage builds a world BLAS/TLAS and
+updates it when world vertex positions change.
+
+The GPU fixture in `vulkan-ray-lighting` proves more than an image change:
+an opaque wall gives a floor sample of 122; moving that wall away raises it
+to 158; restoring it returns 122; a fully transparent wall yields 158.
+Disabling ray lighting returns the exact classic palette value 128.
+This tests dynamic occlusion, alpha rejection, and the classic fallback.
+Log: `build/ray-shadow-test.log`.
+
+The same checks pass with NR, SR, and FG, alongside camera, mover, sky,
+resize, and generated-pixel checks (`build/ray-neural-test.log`). All
+32 maps also pass the combined ray+NR+SR+FG validation run with generated
+presentation counts (`build/ray-all-levels.log`).
+
+A local native FIFO run was limited near 252 ms per frame both with and
+without lighting. That is not the ray shader's GPU cost. With explicit
+`--no-vsync`, the separate 1280x800 ray run measured 0.730 ms application
+frames and 0.470 ms for GPU world rendering, before the static-AS refit
+optimization. Logs: `build/ray-native-control.log`,
+`build/ray-visible-profile.log`, `build/ray-uncapped-profile.log`.
+
+The completed build passes all 23 tests, including the full lighting and
+neural pipeline on all 32 maps (`build/ray-full-tests.log`). The native-only
+build also passes its 14 tests (`build/ray-native-tests.log`). Neither build
+requires Streamline. Maximize/minimize/restore and clean close pass with
+ray lighting, NR, SR, FG, and synchronization validation enabled
+(`build/window-ray-full-test.log`).
+
+The final native captures `build/ray-classic.png` and `build/ray-final.png`
+were visually inspected at the same camera and resolution. The direct
+lighting changes shading while retaining the original texture content.
+This check is separate from NR's model-driven image changes.
+
+The final 4K run with ray lighting, NR, performance SR, and FG rendered
+240 application frames and presented 240 real plus 239 generated frames.
+After warm-up, application-frame time was 17.977 ms (about 55.6 rendered
+FPS); GPU world/lighting was 0.794 ms, NR 8.152 ms, SR 3.887 ms, and
+HUD/FG 3.795 ms. Validation was off for this isolated timing run.
+Log: `build/ray-full-4k.log`.
+
+The normal `build/doom-raylib.exe` was rebuilt with NR/SR/FG support. Its
+final 64-frame ray+NR+SR+FG smoke run passed synchronization validation,
+started WinMM MIDI playback, and presented 64 real plus 63 generated
+frames (`build/ray-default-music-smoke.log`). A separate native-only build
+also rendered ray lighting with validation and no NGX dependency
+(`build/ray-native-only-smoke.log`). Final build and smoke logs contain no
+compiler warnings or validation diagnostics.

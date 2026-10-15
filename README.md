@@ -1,15 +1,16 @@
-# Doom / raylib PoC
+# Doom / Vulkan PoC
 
-C23, Clang, CMake, raylib 6.0, OpenGL 3.3. A separate `wad-convert`
+C23, Clang, CMake, Vulkan 1.3, GLFW. A separate `wad-convert`
 tool turns any original `DOOM2.WAD` level (MAP01..MAP32) into a `.drmap`
 scene and its original music into a `.mid` file. The viewer reads
 only the prepared scene: it has no WAD parser or tessellator.
 
 ## Build and run
 
-Need CMake 3.28+, Ninja, Git, and Clang 19+ with C23 `#embed` support.
+Need CMake 3.28+, Ninja, Git, Clang 19+, and the Vulkan SDK with `glslc`.
 Windows also needs the Visual Studio C++ Build Tools and Windows SDK.
-The first CMake run downloads pinned raylib and libtess2 sources.
+The first CMake run downloads pinned GLFW, stb, and libtess2 sources.
+The executable keeps the name `doom-raylib` so existing scripts still work.
 Python is optional; it adds the synthetic format checks to CTest.
 
 From PowerShell in this folder, with Clang on PATH:
@@ -48,7 +49,7 @@ WASD walks; mouse turns the view. Walls block motion and allow sliding.
 The player goes up steps of at most 24 Doom units and falls to lower floors.
 Left Shift runs. E / Space uses doors, floor switches, and lifts. Left click activates
 gun-trigger doors. Touch cards or skull keys to unlock doors of that color.
-The colored squares show held keys. Tab frees or takes the mouse; R goes back
+The HUD lists held keys. Tab frees or takes the mouse; R goes back
 to the player-one start. Escape closes the window. There is no jump.
 
 N turns debug noclip on or off. In noclip, Space / left Ctrl moves up / down.
@@ -87,15 +88,37 @@ See [MUSIC.md](docs/MUSIC.md) for format and playback details.
 ./build/doom-raylib.exe ./build/MAP01.drmap --overview --frames 2 --screenshot ./build/map01-overview.png
 ```
 
-Finite frame runs use a hidden window, but still need a working OpenGL
-context. `--inspect` does not open a window.
+Finite frame runs use a hidden window, but still need a Vulkan 1.3 GPU
+and driver. `--inspect` does not open a window. `--validation` enables
+the Vulkan validation layer from the SDK.
+
+DLSS starts enabled when built in, with style 1 and two NR passes.
+FG starts disabled; ray lighting starts enabled.
+Use `--no-dlss`, `--no-fg`, or `--no-ray-lighting` to start with an effect off.
+F5 switches DLSS (NR + SR), F9 switches FG, and L switches ray lighting.
+GPU resources stay available for live switching, including when an effect starts off.
+DLSS neural rendering works through the public NGX SDK and a
+separate NR runtime. `--dlss5` is an alias for `--dlss`. Use F6 to toggle NR,
+F7 for style, and F8 for 1/2/4 passes. SR defaults to performance mode;
+use `--sr off` for native-resolution NR, or `--sr quality|balanced`.
+Extra passes cost extra GPU work and can amplify artifacts.
+Direct NGX frame generation needs a build with
+`DOOM_FRAME_GENERATION=ON`. The HUD distinguishes render FPS from FG mode.
+Ray lighting provides dynamic ray-query shadows and sector-derived lights;
+`L` restores classic lighting. `--no-vsync` allows uncapped native rendering.
+See [VULKAN.md](docs/VULKAN.md) for setup, the runtime filename workaround,
+GPU checks, and limits. This is an experimental community integration.
 
 ## Scope
 
 The target is the original Doom II IWAD. The scene has original wall
 textures, world-aligned floors and ceilings, sector height changes,
-texture offsets and pegging, palette light, sky surfaces, and static
-sprites for single-player medium difficulty.
+texture offsets and pegging, palette light, sky surfaces, and animated
+sprites for single-player medium difficulty. Monsters use their original idle
+loops; animated pickups and props use their original frame order, timing,
+and fullbright states. Playback follows the 35 Hz game clock. Static weapons
+and corpses keep their original single frame. Existing `.drmap` files must
+be converted again for the DRMAP006 format.
 
 The converter builds closed sector contours from linedefs and uses
 libtess2 for concave areas, holes, and separate contours. Every closed sector's
@@ -104,8 +127,8 @@ gaps caused by rounded classic BSP splits. BSP is used only in the
 converter to find the floor height and light at thing positions. Original
 open-outline sectors use original BSP regions instead of guessed closing edges.
 
-The viewer uploads prepared meshes and index textures once. Doors and floors update
-affected mesh buffers, including texture pegging and UV motion. Each pixel
+The viewer uploads index textures and updates world geometry for live sectors,
+including texture pegging and UV motion. Each pixel
 gets its color from an original PLAYPAL/COLORMAP lookup table. Transparent
 patch gaps have their own alpha mask: palette index zero remains a valid
 color. Texture decoding and floor triangulation stay in the converter.
@@ -125,7 +148,7 @@ and hazardous floors are active. See [INTERACTION.md](docs/INTERACTION.md)
 for the action inventory, MAP01 secret links, and simulation limits.
 There are no enemies in motion, collisions with sprites, non-key
 pickups, weapon view, sound effects, light animation, texture animation,
-or sprite angle/frame selection. Sky projection and the choice of light
+or sprite angle selection. Sky projection and the choice of light
 table row are approximations; this is not a pixel-exact Doom renderer.
 Monster-only triggers and boss-death progression need combat/AI and remain
 unimplemented. Debug noclip lets you explore past them. This does not claim

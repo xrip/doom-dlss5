@@ -98,7 +98,7 @@ static void put_float(FILE *file, float value) {
 void scene_write(const Scene *scene, const char *path) {
     FILE *file = fopen(path, "wb");
     if (!file) fail("Cannot create %s", path);
-    put_bytes(file, "DRMAP005", 8);
+    put_bytes(file, "DRMAP006", 8);
     put_bytes(file, scene->map, 8);
     put_u32(file, (uint32_t)scene->asset_count);
     put_u32(file, (uint32_t)scene->batch_count);
@@ -133,12 +133,17 @@ void scene_write(const Scene *scene, const char *path) {
     for (size_t index = 0; index < scene->sprite_count; ++index) {
         const Sprite *sprite = &scene->sprites[index];
         put_u32(file, sprite->asset);
-        put_u32(file, sprite->shade);
         put_u32(file, sprite->sector);
         put_u32(file, (uint32_t)sprite->ceiling | ((uint32_t)sprite->fullbright << 1));
         put_float(file, sprite->position.x);
         put_float(file, sprite->position.y);
         put_float(file, sprite->position.z);
+        put_u32(file, sprite->frame_count);
+        for (uint32_t frame = 0; frame < sprite->frame_count; ++frame) {
+            put_u32(file, sprite->frames[frame].asset);
+            put_u32(file, sprite->frames[frame].ticks);
+            put_u32(file, (uint32_t)sprite->frames[frame].fullbright);
+        }
     }
     put_u32(file, (uint32_t)scene->sector_count);
     put_u32(file, (uint32_t)scene->line_count);
@@ -215,7 +220,7 @@ Scene scene_read(const char *path) {
     size_t size;
     uint8_t *bytes = read_file(path, &size);
     Reader reader = {bytes, size, 0};
-    if (memcmp(take(&reader, 8), "DRMAP005", 8)) fail("Unsupported scene format; run wad-convert again");
+    if (memcmp(take(&reader, 8), "DRMAP006", 8)) fail("Unsupported scene format; run wad-convert again");
     Scene scene = {0};
     memcpy(scene.map, take(&reader, 8), 8);
     scene.asset_count = get_u32(&reader);
@@ -260,13 +265,29 @@ Scene scene_read(const char *path) {
     }
     for (size_t index = 0; index < scene.sprite_count; ++index) {
         Sprite *sprite = &scene.sprites[index];
-        sprite->asset = get_u32(&reader); sprite->shade = get_u32(&reader);
+        sprite->asset = get_u32(&reader);
         sprite->sector = get_u32(&reader);
         uint32_t flags = get_u32(&reader);
         if (flags > 3) fail("Invalid sprite flags");
         sprite->ceiling = (flags & 1) != 0; sprite->fullbright = (flags & 2) != 0;
-        if (sprite->asset >= scene.asset_count || sprite->shade > 31) fail("Invalid scene sprite");
+        if (sprite->asset >= scene.asset_count) fail("Invalid scene sprite");
         sprite->position = get_position(&reader);
+        sprite->frame_count = get_u32(&reader);
+        if (sprite->frame_count > MAX_SPRITE_FRAMES) fail("Too many sprite animation frames");
+        for (uint32_t frame = 0; frame < sprite->frame_count; ++frame) {
+            SpriteFrame *entry = &sprite->frames[frame];
+            entry->asset = get_u32(&reader);
+            entry->ticks = get_u32(&reader);
+            uint32_t bright = get_u32(&reader);
+            if (entry->asset >= scene.asset_count || !entry->ticks || entry->ticks > 350 || bright > 1)
+                fail("Invalid sprite animation frame");
+            entry->fullbright = bright != 0;
+        }
+        if (sprite->frame_count) {
+            sprite->asset = sprite->frames[0].asset;
+            sprite->fullbright = sprite->frames[0].fullbright;
+            sprite->frame_ticks = sprite->frames[0].ticks;
+        }
     }
     scene.sector_count = get_u32(&reader);
     scene.line_count = get_u32(&reader);
@@ -353,6 +374,22 @@ void scene_free(Scene *scene) {
     free(scene->sectors); free(scene->lines); free(scene->regions);
     free(scene->walls); free(scene->teleports);
     *scene = (Scene){0};
+}
+
+void scene_tick_sprites(Scene *scene) {
+    for (size_t index = 0; index < scene->sprite_count; ++index) {
+        Sprite *sprite = &scene->sprites[index];
+        if (!sprite->frame_count || sprite->hidden) continue;
+        if (sprite->frame_ticks > 1) {
+            --sprite->frame_ticks;
+            continue;
+        }
+        sprite->frame_index = (sprite->frame_index + 1) % sprite->frame_count;
+        const SpriteFrame *frame = &sprite->frames[sprite->frame_index];
+        sprite->frame_ticks = frame->ticks;
+        sprite->asset = frame->asset;
+        sprite->fullbright = frame->fullbright;
+    }
 }
 
 void scene_print(const Scene *scene) {

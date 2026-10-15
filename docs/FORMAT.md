@@ -1,6 +1,6 @@
-# DRMAP005
+# DRMAP006
 
-Version five is a compact, sequential scene file. All integers are
+Version six is a compact, sequential scene file. All integers are
 little-endian. Floats are IEEE-754 binary32, written in little-endian
 order. Names are eight bytes, padded with zero bytes. There are no
 struct dumps, native pointers, WAD records, or BSP nodes in the file.
@@ -13,7 +13,7 @@ looking along world +X and positive yaw turning toward world -Z.
 
 | Field | Size |
 | --- | --- |
-| Magic `DRMAP005` | 8 bytes |
+| Magic `DRMAP006` | 8 bytes |
 | Map name | 8 bytes |
 | Asset count, batch count, sprite count | 3 x uint32 |
 | Spawn x, y, z and yaw | 4 x float32 |
@@ -51,14 +51,18 @@ in the shader rather than ordinary UVs.
 
 ## Sprites
 
-For each sprite: asset index, shade, owner sector, and flags
-(4 x uint32), then world x, y, z (3 x float32), 28 bytes total.
+For each sprite: asset index, owner sector, and flags
+(3 x uint32), then world x, y, z (3 x float32), then animation frame count
+(uint32, 0..8). Each frame stores asset index, duration in 35 Hz ticks,
+and fullbright flag (3 x uint32). A zero frame count means a static sprite.
+Durations are 1..350 and fullbright is 0 or 1. The first frame is the
+initial state; the sequence loops. Frame index and countdown are runtime state.
 Flag bit 0 is the ceiling anchor; bit 1 is fullbright. Other bits are rejected.
 The owner lets
 floor motion carry grounded sprites without changing hanging sprites.
 The viewer uses a vertical quad with the asset's patch offsets
-and turns it around the vertical axis with the camera. Only one static
-patch per type is stored in this version. Grounded positions are corrected
+and turns it around the vertical axis with the camera. Animation patches
+are decoded during conversion and shared as assets. Grounded positions are corrected
 so the last opaque patch row meets the floor. Hanging sprites use ceiling
 height. Runtime pickup flags are not serialized.
 

@@ -8,7 +8,7 @@ or download game assets. The WAD is read as input and is never changed.
 
 Use PowerShell from the project folder. Install Clang 19 or newer, CMake
 3.28 or newer, Ninja, Git, and the Visual Studio C++ Build Tools with the
-Windows SDK. Put Clang on `PATH`, then run:
+Windows SDK, plus the Vulkan SDK with `glslc`. Put Clang on `PATH`, then run:
 
 ```powershell
 $env:PATH = 'C:/Program Files/LLVM/bin;' + $env:PATH
@@ -19,10 +19,20 @@ ctest --preset clang
 
 The preset puts the executables in `build`. If a script reports a missing
 executable, run these commands; the scripts do not install tools for you.
-The first CMake configure may fetch the pinned raylib and libtess2 source
+The first CMake configure may fetch the pinned GLFW, stb, and libtess2 source
 dependencies; it does not fetch a game WAD.
 
 ## Convert and run one map
+
+For a build configured with NR support, add `-Dlss5` to `run-map.ps1`.
+F6 toggles neural rendering, F7 changes style, and F8 changes pass count.
+SR stays active when NR is toggled off. Direct engine runs accept
+`--sr off|quality|balanced|performance`; performance is the NR launch default.
+See [VULKAN.md](VULKAN.md) for the required SDK/runtime setup.
+With a frame-generation-enabled build, `-FrameGeneration` adds `--fg` and
+also enables `--dlss5`. It preserves the same map conversion and MIDI path.
+`-RayLighting` adds ray-traced direct lighting; it can be combined with
+`-FrameGeneration`. Press `L` in the viewer to compare with classic lighting.
 
 `-Wad` is required. Relative WAD and output paths start at the project
 folder. The default output folder is `build/maps`.
@@ -94,6 +104,6 @@ sprite anchors, and blocked lift reversal. The batch
 script stops at the first conversion error and does not run map-specific test
 executables.
 
-Prepared scenes now use DRMAP005 for sector light/material data, sprite
+Prepared scenes now use DRMAP006 for sprite animation frames, sector light/material data, sprite
 anchors/fullbright flags, and teleport destinations. Reconvert older files
 with `convert-all.ps1` or `run-map.ps1`; previous versions are not accepted.

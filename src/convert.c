@@ -539,6 +539,82 @@ static const ThingImage thing_images[] = {
     {2048, "AMMOA0", false}, {2049, "SBOXA0", false}
 };
 
+typedef struct {
+    const char *patch, *frames;
+    unsigned ticks[MAX_SPRITE_FRAMES], bright;
+} ThingAnimation;
+
+static const ThingAnimation thing_animations[] = {
+    {"TROOA1", "AB", {10, 10}, 0},
+    {"POSSA1", "AB", {10, 10}, 0},
+    {"SPOSA1", "AB", {10, 10}, 0},
+    {"SPIDA1", "AB", {10, 10}, 0},
+    {"CYBRA1", "AB", {10, 10}, 0},
+    {"SARGA1", "AB", {10, 10}, 0},
+    {"VILEA1", "AB", {10, 10}, 0},
+    {"CPOSA1", "AB", {10, 10}, 0},
+    {"SKELA1", "AB", {10, 10}, 0},
+    {"FATTA1", "AB", {15, 15}, 0},
+    {"BSPIA1", "AB", {10, 10}, 0},
+    {"BOS2A1", "AB", {10, 10}, 0},
+    {"SSWVA1", "AB", {10, 10}, 0},
+    {"BOSSA1", "AB", {10, 10}, 0},
+    {"SKULA1", "AB", {10, 10}, 3},
+    {"BON1A0", "ABCDCB", {6, 6, 6, 6, 6, 6}, 0},
+    {"BON2A0", "ABCDCB", {6, 6, 6, 6, 6, 6}, 0},
+    {"ARM1A0", "AB", {6, 7}, 2},
+    {"ARM2A0", "AB", {6, 6}, 2},
+    {"BKEYA0", "AB", {10, 10}, 2},
+    {"YKEYA0", "AB", {10, 10}, 2},
+    {"RKEYA0", "AB", {10, 10}, 2},
+    {"RSKUA0", "AB", {10, 10}, 2},
+    {"YSKUA0", "AB", {10, 10}, 2},
+    {"BSKUA0", "AB", {10, 10}, 2},
+    {"POL6A0", "AB", {6, 8}, 0},
+    {"POL3A0", "AB", {6, 6}, 3},
+    {"COL5A0", "AB", {14, 14}, 0},
+    {"CEYEA0", "ABCB", {6, 6, 6, 6}, 15},
+    {"FSKUA0", "ABC", {6, 6, 6}, 7},
+    {"TBLUA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"TGRNA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"TREDA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"GOR1A0", "ABCB", {10, 15, 8, 6}, 0},
+    {"SMBTA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"SMGTA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"SMRTA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"FCANA0", "ABC", {4, 4, 4}, 7},
+    {"TLMPA0", "ABCD", {4, 4, 4, 4}, 15},
+    {"TLP2A0", "ABCD", {4, 4, 4, 4}, 15},
+    {"MEGAA0", "ABCD", {6, 6, 6, 6}, 15},
+    {"SOULA0", "ABCDCB", {6, 6, 6, 6, 6, 6}, 63},
+    {"PINVA0", "ABCD", {6, 6, 6, 6}, 15},
+    {"PINSA0", "ABCD", {6, 6, 6, 6}, 15},
+    {"PMAPA0", "ABCDCB", {6, 6, 6, 6, 6, 6}, 63},
+    {"BAR1A0", "AB", {6, 6}, 0},
+    {"PVISA0", "AB", {6, 6}, 1},
+};
+
+static void make_sprite_animation(Converter *converter, Sprite *sprite, const char *patch) {
+    for (size_t index = 0; index < sizeof(thing_animations) / sizeof(thing_animations[0]); ++index) {
+        const ThingAnimation *animation = &thing_animations[index];
+        if (strcmp(animation->patch, patch)) continue;
+        size_t count = strlen(animation->frames);
+        if (!count || count > MAX_SPRITE_FRAMES) fail("Invalid sprite animation %s", patch);
+        sprite->frame_count = (uint32_t)count;
+        for (uint32_t frame = 0; frame < sprite->frame_count; ++frame) {
+            char name[9];
+            snprintf(name, sizeof(name), "%s", patch);
+            name[4] = animation->frames[frame];
+            sprite->frames[frame] = (SpriteFrame){.asset = get_asset(converter, name, 2),
+                .ticks = animation->ticks[frame], .fullbright = (animation->bright & (1u << frame)) != 0};
+        }
+        sprite->asset = sprite->frames[0].asset;
+        sprite->fullbright = sprite->frames[0].fullbright;
+        sprite->frame_ticks = sprite->frames[0].ticks;
+        return;
+    }
+}
+
 static void make_things(Converter *converter) {
     bool spawn_found = false;
     Scene *scene = &converter->scene;
@@ -583,9 +659,10 @@ static void make_things(Converter *converter) {
                 }
             }
         }
-        scene->sprites[scene->sprite_count++] = (Sprite){.asset = asset, .shade = image->flags & 1 ? 0 : shade(data),
+        scene->sprites[scene->sprite_count++] = (Sprite){.asset = asset,
             .sector = sector_index, .position = position, .ceiling = (image->flags & 2) != 0,
             .fullbright = (image->flags & 1) != 0};
+        make_sprite_animation(converter, &scene->sprites[scene->sprite_count - 1], image->patch);
     }
     if (!spawn_found) fail("Map has no player-one start");
 }

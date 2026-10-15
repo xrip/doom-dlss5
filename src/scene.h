@@ -20,9 +20,18 @@ typedef struct {
     SceneVertex *vertices;
 } Batch;
 typedef struct {
-    uint32_t asset, shade, sector;
+    uint32_t asset, ticks;
+    bool fullbright;
+} SpriteFrame;
+
+enum { MAX_SPRITE_FRAMES = 8 };
+
+typedef struct {
+    uint32_t asset, sector;
     Position position;
     bool ceiling, fullbright, hidden;
+    uint32_t frame_count, frame_index, frame_ticks;
+    SpriteFrame frames[MAX_SPRITE_FRAMES];
 } Sprite;
 typedef struct { float x, z; } MapPoint;
 typedef struct {
@@ -76,6 +85,7 @@ void scene_write(const Scene *scene, const char *path);
 Scene scene_read(const char *path);
 void scene_free(Scene *scene);
 void scene_print(const Scene *scene);
+void scene_tick_sprites(Scene *scene);
 void wall_vertices(const Scene *scene, const WallSurface *wall, SceneVertex vertices[6]);
 float line_distance_squared(const CollisionLine *line, float x, float z);
 uint32_t line_neighbor(const CollisionLine *line, uint32_t sector);

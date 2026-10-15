@@ -21,29 +21,28 @@ void specials_free(Specials *specials) {
 }
 
 typedef struct { unsigned special, trigger, mode, key; bool manual, repeat, fast; } DoorAction;
-enum { TRIGGER_USE, TRIGGER_WALK, TRIGGER_SHOOT };
 static const DoorAction actions[] = {
-    {1, TRIGGER_USE, DOOR_RAISE, 0, true, true, false}, {31, TRIGGER_USE, DOOR_OPEN_STAY, 0, true, false, false},
-    {26, TRIGGER_USE, DOOR_RAISE, 1, true, true, false}, {27, TRIGGER_USE, DOOR_RAISE, 2, true, true, false},
-    {28, TRIGGER_USE, DOOR_RAISE, 4, true, true, false}, {32, TRIGGER_USE, DOOR_OPEN_STAY, 1, true, false, false},
-    {33, TRIGGER_USE, DOOR_OPEN_STAY, 4, true, false, false}, {34, TRIGGER_USE, DOOR_OPEN_STAY, 2, true, false, false},
-    {2, TRIGGER_WALK, DOOR_OPEN_STAY, 0, false, false, false}, {3, TRIGGER_WALK, DOOR_CLOSE, 0, false, false, false},
-    {4, TRIGGER_WALK, DOOR_RAISE, 0, false, false, false}, {16, TRIGGER_WALK, DOOR_CLOSE_WAIT_OPEN, 0, false, false, false},
-    {29, TRIGGER_USE, DOOR_RAISE, 0, false, false, false}, {42, TRIGGER_USE, DOOR_CLOSE, 0, false, true, false},
-    {46, TRIGGER_SHOOT, DOOR_OPEN_STAY, 0, false, true, false}, {61, TRIGGER_USE, DOOR_OPEN_STAY, 0, false, true, false},
-    {63, TRIGGER_USE, DOOR_RAISE, 0, false, true, false}, {75, TRIGGER_WALK, DOOR_CLOSE, 0, false, true, false},
-    {76, TRIGGER_WALK, DOOR_CLOSE_WAIT_OPEN, 0, false, true, false}, {86, TRIGGER_WALK, DOOR_OPEN_STAY, 0, false, true, false},
-    {90, TRIGGER_WALK, DOOR_RAISE, 0, false, true, false}, {103, TRIGGER_USE, DOOR_OPEN_STAY, 0, false, false, false},
-    {105, TRIGGER_WALK, DOOR_RAISE, 0, false, true, true}, {106, TRIGGER_WALK, DOOR_OPEN_STAY, 0, false, true, true},
-    {107, TRIGGER_WALK, DOOR_CLOSE, 0, false, true, true}, {108, TRIGGER_WALK, DOOR_RAISE, 0, false, false, true},
-    {109, TRIGGER_WALK, DOOR_OPEN_STAY, 0, false, false, true}, {110, TRIGGER_WALK, DOOR_CLOSE, 0, false, false, true},
-    {111, TRIGGER_USE, DOOR_RAISE, 0, false, false, true}, {112, TRIGGER_USE, DOOR_OPEN_STAY, 0, false, false, true},
-    {113, TRIGGER_USE, DOOR_CLOSE, 0, false, false, true}, {114, TRIGGER_USE, DOOR_RAISE, 0, false, true, true},
-    {115, TRIGGER_USE, DOOR_OPEN_STAY, 0, false, true, true}, {116, TRIGGER_USE, DOOR_CLOSE, 0, false, true, true},
-    {117, TRIGGER_USE, DOOR_RAISE, 0, true, true, true}, {118, TRIGGER_USE, DOOR_OPEN_STAY, 0, true, false, true},
-    {99, TRIGGER_USE, DOOR_OPEN_STAY, 1, false, true, true}, {133, TRIGGER_USE, DOOR_OPEN_STAY, 1, false, false, true},
-    {134, TRIGGER_USE, DOOR_OPEN_STAY, 4, false, true, true}, {135, TRIGGER_USE, DOOR_OPEN_STAY, 4, false, false, true},
-    {136, TRIGGER_USE, DOOR_OPEN_STAY, 2, false, true, true}, {137, TRIGGER_USE, DOOR_OPEN_STAY, 2, false, false, true}
+    {1, SECTOR_USE, DOOR_RAISE, 0, true, true, false}, {31, SECTOR_USE, DOOR_OPEN_STAY, 0, true, false, false},
+    {26, SECTOR_USE, DOOR_RAISE, 1, true, true, false}, {27, SECTOR_USE, DOOR_RAISE, 2, true, true, false},
+    {28, SECTOR_USE, DOOR_RAISE, 4, true, true, false}, {32, SECTOR_USE, DOOR_OPEN_STAY, 1, true, false, false},
+    {33, SECTOR_USE, DOOR_OPEN_STAY, 4, true, false, false}, {34, SECTOR_USE, DOOR_OPEN_STAY, 2, true, false, false},
+    {2, SECTOR_WALK, DOOR_OPEN_STAY, 0, false, false, false}, {3, SECTOR_WALK, DOOR_CLOSE, 0, false, false, false},
+    {4, SECTOR_WALK, DOOR_RAISE, 0, false, false, false}, {16, SECTOR_WALK, DOOR_CLOSE_WAIT_OPEN, 0, false, false, false},
+    {29, SECTOR_USE, DOOR_RAISE, 0, false, false, false}, {42, SECTOR_USE, DOOR_CLOSE, 0, false, true, false},
+    {46, SECTOR_SHOOT, DOOR_OPEN_STAY, 0, false, true, false}, {61, SECTOR_USE, DOOR_OPEN_STAY, 0, false, true, false},
+    {63, SECTOR_USE, DOOR_RAISE, 0, false, true, false}, {75, SECTOR_WALK, DOOR_CLOSE, 0, false, true, false},
+    {76, SECTOR_WALK, DOOR_CLOSE_WAIT_OPEN, 0, false, true, false}, {86, SECTOR_WALK, DOOR_OPEN_STAY, 0, false, true, false},
+    {90, SECTOR_WALK, DOOR_RAISE, 0, false, true, false}, {103, SECTOR_USE, DOOR_OPEN_STAY, 0, false, false, false},
+    {105, SECTOR_WALK, DOOR_RAISE, 0, false, true, true}, {106, SECTOR_WALK, DOOR_OPEN_STAY, 0, false, true, true},
+    {107, SECTOR_WALK, DOOR_CLOSE, 0, false, true, true}, {108, SECTOR_WALK, DOOR_RAISE, 0, false, false, true},
+    {109, SECTOR_WALK, DOOR_OPEN_STAY, 0, false, false, true}, {110, SECTOR_WALK, DOOR_CLOSE, 0, false, false, true},
+    {111, SECTOR_USE, DOOR_RAISE, 0, false, false, true}, {112, SECTOR_USE, DOOR_OPEN_STAY, 0, false, false, true},
+    {113, SECTOR_USE, DOOR_CLOSE, 0, false, false, true}, {114, SECTOR_USE, DOOR_RAISE, 0, false, true, true},
+    {115, SECTOR_USE, DOOR_OPEN_STAY, 0, false, true, true}, {116, SECTOR_USE, DOOR_CLOSE, 0, false, true, true},
+    {117, SECTOR_USE, DOOR_RAISE, 0, true, true, true}, {118, SECTOR_USE, DOOR_OPEN_STAY, 0, true, false, true},
+    {99, SECTOR_USE, DOOR_OPEN_STAY, 1, false, true, true}, {133, SECTOR_USE, DOOR_OPEN_STAY, 1, false, false, true},
+    {134, SECTOR_USE, DOOR_OPEN_STAY, 4, false, true, true}, {135, SECTOR_USE, DOOR_OPEN_STAY, 4, false, false, true},
+    {136, SECTOR_USE, DOOR_OPEN_STAY, 2, false, true, true}, {137, SECTOR_USE, DOOR_OPEN_STAY, 2, false, false, true}
 };
 
 static const DoorAction *door_action(unsigned special) {
@@ -55,11 +54,11 @@ static const DoorAction *door_action(unsigned special) {
 enum { LIGHT_MINIMUM, LIGHT_MAXIMUM, LIGHT_DARK, LIGHT_BRIGHT, LIGHT_STROBE };
 typedef struct { unsigned special, trigger, mode; bool repeat; } LightAction;
 static const LightAction light_actions[] = {
-    {12, TRIGGER_WALK, LIGHT_MAXIMUM, false}, {13, TRIGGER_WALK, LIGHT_BRIGHT, false},
-    {17, TRIGGER_WALK, LIGHT_STROBE, false}, {35, TRIGGER_WALK, LIGHT_DARK, false},
-    {79, TRIGGER_WALK, LIGHT_DARK, true}, {80, TRIGGER_WALK, LIGHT_MAXIMUM, true},
-    {81, TRIGGER_WALK, LIGHT_BRIGHT, true}, {104, TRIGGER_WALK, LIGHT_MINIMUM, false},
-    {138, TRIGGER_USE, LIGHT_BRIGHT, true}, {139, TRIGGER_USE, LIGHT_DARK, true}
+    {12, SECTOR_WALK, LIGHT_MAXIMUM, false}, {13, SECTOR_WALK, LIGHT_BRIGHT, false},
+    {17, SECTOR_WALK, LIGHT_STROBE, false}, {35, SECTOR_WALK, LIGHT_DARK, false},
+    {79, SECTOR_WALK, LIGHT_DARK, true}, {80, SECTOR_WALK, LIGHT_MAXIMUM, true},
+    {81, SECTOR_WALK, LIGHT_BRIGHT, true}, {104, SECTOR_WALK, LIGHT_MINIMUM, false},
+    {138, SECTOR_USE, LIGHT_BRIGHT, true}, {139, SECTOR_USE, LIGHT_DARK, true}
 };
 
 static const LightAction *light_action(unsigned special) {
@@ -72,9 +71,9 @@ static unsigned action_trigger(unsigned special) {
     const DoorAction *door = door_action(special);
     const SectorAction *floor = sector_action(special);
     const LightAction *light = light_action(special);
-    if (special == 11 || special == 51) return TRIGGER_USE;
+    if (special == 11 || special == 51) return SECTOR_USE;
     if (special == 39 || special == 97 || special == 125 || special == 126 || special == 52 || special == 124)
-        return TRIGGER_WALK;
+        return SECTOR_WALK;
     return door ? door->trigger : floor ? floor->trigger : light ? light->trigger : UINT32_MAX;
 }
 
@@ -220,7 +219,7 @@ static bool activate(Scene *scene, Specials *specials, CollisionLine *line, uint
         started = result || started;
     }
     if (started && !repeat) line->special = 0;
-    if (started && !manual && trigger != TRIGGER_WALK)
+    if (started && !manual && trigger != SECTOR_WALK)
         specials->switch_ticks[line - scene->lines] = repeat ? 35 : UINT32_MAX;
     return started;
 }
@@ -233,6 +232,11 @@ static float ray_line(Position origin, float dx, float dz, const CollisionLine *
     float distance = (offset_x * edge_z - offset_z * edge_x) / denominator;
     float along = (offset_x * dz - offset_z * dx) / denominator;
     return distance >= 0 && along >= 0 && along <= 1 ? distance : -1;
+}
+
+static float line_side(const CollisionLine *line, Position point) {
+    return (line->end.x - line->start.x) * (point.z - line->start.z) -
+           (line->end.z - line->start.z) * (point.x - line->start.x);
 }
 
 static bool trace_special(Scene *scene, Specials *specials, const Player *player, float yaw, bool shoot) {
@@ -249,14 +253,13 @@ static bool trace_special(Scene *scene, Specials *specials, const Player *player
             solid = opening <= 0;
         }
         unsigned trigger = action_trigger(line->special);
-        if (!solid && (trigger == UINT32_MAX || (shoot && trigger != TRIGGER_SHOOT))) continue;
+        if (!solid && (trigger == UINT32_MAX || (shoot && trigger != SECTOR_SHOOT))) continue;
         nearest = distance; target = line;
     }
     if (!target) return false;
-    float front_side = (target->end.x - target->start.x) * (player->feet.z - target->start.z) -
-                       (target->end.z - target->start.z) * (player->feet.x - target->start.x);
+    float front_side = line_side(target, player->feet);
     unsigned trigger = action_trigger(target->special);
-    if (front_side < 0 || trigger != (unsigned)(shoot ? TRIGGER_SHOOT : TRIGGER_USE)) return false;
+    if (front_side < 0 || trigger != (unsigned)(shoot ? SECTOR_SHOOT : SECTOR_USE)) return false;
     return activate(scene, specials, target, player->keys);
 }
 
@@ -266,11 +269,6 @@ bool specials_use(Scene *scene, Specials *specials, const Player *player, float 
 
 bool specials_shoot(Scene *scene, Specials *specials, const Player *player, float yaw) {
     return trace_special(scene, specials, player, yaw, true);
-}
-
-static float line_side(const CollisionLine *line, Position point) {
-    return (line->end.x - line->start.x) * (point.z - line->start.z) -
-           (line->end.z - line->start.z) * (point.x - line->start.x);
 }
 
 static bool teleport_player(Scene *scene, Specials *specials, CollisionLine *line, Player *player) {
@@ -294,7 +292,7 @@ bool specials_cross(Scene *scene, Specials *specials, Position from, Position to
     float dx = to.x - from.x, dz = to.z - from.z;
     for (size_t index = 0; index < scene->line_count; ++index) {
         CollisionLine *line = &scene->lines[index];
-        if (action_trigger(line->special) != TRIGGER_WALK) continue;
+        if (action_trigger(line->special) != SECTOR_WALK) continue;
         bool from_back = line_side(line, from) < 0, to_back = line_side(line, to) < 0;
         if (from_back == to_back) continue;
         float crossing = ray_line(from, dx, dz, line);
@@ -308,6 +306,7 @@ bool specials_cross(Scene *scene, Specials *specials, Position from, Position to
 
 void specials_tick(Scene *scene, Specials *specials, Player *player) {
     ++specials->ticks;
+    scene_tick_sprites(scene);
     if (specials->secret_message) --specials->secret_message;
     for (size_t index = 0; index < scene->wall_count; ++index)
         if (scene->lines[scene->walls[index].line].special == 48 && !scene->walls[index].side)
