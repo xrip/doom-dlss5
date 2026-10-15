@@ -1,5 +1,24 @@
 # YAGNI, KISS, and DRY review
 
+## Player shadow and mouse look checkpoint
+
+- Reused shared pose meshes, object matrices, and the ray TLAS for one
+  player caster. Raster draws still include only map sprites; there is no
+  extra render pass, light, actor framework, or format version.
+- Imported only the needed `PLAYA1` idle pose. Missing models use the
+  existing alpha-tested sprite path; missing patches report the need to
+  reconvert old prepared maps rather than adding runtime WAD parsing.
+- Shared the visible-bottom-row floor offset between map conversion and
+  the player sprite. Feet and yaw drive the caster; view bob and pitch do not.
+- Enabled walking pitch in the existing input path with a fixed 89-degree
+  limit. Ground movement and use/shoot direction are unchanged.
+- Kept tests for voxel/sprite shadows, cutouts, facing, movement, hiding,
+  and exclusion from raster color/motion. Local input and real-map capture
+  harnesses remain ignored build artifacts, not new engine layers.
+
+The Clang build and 22 non-NGX tests pass. Tests do not initialize NGX or
+change driver settings. Source WAD/voxel assets stay outside the commit.
+
 ## Optional voxel checkpoint
 
 Reviewed the voxel converter, native sidecar, renderer ranges, shadow

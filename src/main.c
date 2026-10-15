@@ -144,7 +144,7 @@ static bool move_camera(GLFWwindow *window, Input *input, float seconds, Scene *
     if (*captured) {
         float mouse_x = (float)input->mouse_x, mouse_y = (float)input->mouse_y;
         *yaw -= mouse_x * 0.0025f;
-        if (noclip) *pitch = fmaxf(-1.5f, fminf(1.5f, *pitch - mouse_y * 0.0025f));
+        *pitch = fmaxf(-89.0f * radians, fminf(89.0f * radians, *pitch - mouse_y * 0.0025f));
     }
     int forward_input = (int)(glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) - (int)(glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
     int side_input = (int)(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) - (int)(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
@@ -513,6 +513,7 @@ load_scene:
                 if (next_exists && input.pressed[GLFW_KEY_ENTER]) advance = true;
             }
         }
+        renderer_set_player(renderer, noclip ? NULL : &player.feet, yaw);
         renderer_draw(renderer, &scene, &specials, &camera, reset_history);
         if (screenshot && frame == frames - 1) renderer_capture(renderer, screenshot);
         if (motion_capture && frame == frames - 1) renderer_capture_motion(renderer, motion_capture);

@@ -72,7 +72,7 @@ ctest --test-dir build --output-on-failure -LE ngx
 
 ## Controls
 
-WASD walks; mouse turns the view. Walls block motion and allow sliding.
+WASD walks; mouse looks left/right and up/down. Walls block motion and allow sliding.
 The player goes up steps of at most 24 Doom units and falls to lower floors.
 Left Shift runs. E / Space uses doors, floor switches, and lifts. Left click activates
 gun-trigger doors. Touch cards or skull keys to unlock doors of that color.
@@ -84,7 +84,8 @@ Going back to walking resets to the player start. `--noclip` starts in this
 mode; `--overview` also uses noclip.
 
 Movement has 35 Hz acceleration/friction, distinct walk/run/strafe speeds,
-view bob, step smoothing, and 90-degree horizontal FOV. Walking has no mouse pitch.
+view bob, step smoothing, and 90-degree horizontal FOV. Mouse pitch is limited
+to 89 degrees up/down; walking and use/shoot direction stay horizontal.
 The HUD shows health and found secrets. Sector hazards can kill the player;
 R returns to the start with fresh health. An exit shows the map result;
 Enter loads the next prepared map and its music from the same folder.

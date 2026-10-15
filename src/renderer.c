@@ -265,6 +265,9 @@ struct Renderer {
     size_t hud_offset;
     size_t *batch_offsets;
     SpriteMesh *sprite_meshes;
+    Sprite player_shadow;
+    size_t object_count;
+    float player_floor_offset;
     uint32_t *base_assets;
     Position *previous_scene_positions;
     RenderCamera previous_camera;
@@ -1585,11 +1588,22 @@ static void build_sprite_meshes(Renderer *renderer, const Scene *scene) {
     }
 }
 
+static const Sprite *shadow_sprite(const Renderer *renderer, const Scene *scene, size_t index) {
+    return index < scene->sprite_count ? &scene->sprites[index] : &renderer->player_shadow;
+}
+
+void renderer_set_player(Renderer *renderer, const Position *feet, float yaw) {
+    renderer->player_shadow.hidden = feet == NULL;
+    if (feet) renderer->player_shadow.position = *feet;
+    renderer->player_shadow.yaw = yaw;
+}
+
 static bool build_sprites(Renderer *renderer, const Scene *scene, const RenderCamera *camera) {
     bool crosses_planes = false;
     float facing = atan2f(-(camera->target.z - camera->position.z), camera->target.x - camera->position.x) - pi_value * 0.5f;
-    for (size_t index = 0; index < scene->sprite_count; ++index) {
-        const Sprite *sprite = &scene->sprites[index];
+    for (size_t index = 0; index + 1 < renderer->object_count; ++index) {
+        const Sprite *sprite = shadow_sprite(renderer, scene, index);
+        bool player = index == scene->sprite_count;
         bool voxel = scene_sprite_voxel(scene, sprite) != NULL;
         const SpriteMesh *mesh = &renderer->sprite_meshes[sprite->asset * 2 + voxel];
         ObjectFrame *object = &renderer->objects[index + 1];
@@ -1597,9 +1611,12 @@ static bool build_sprites(Renderer *renderer, const Scene *scene, const RenderCa
             (object->mesh[2] & OBJECT_HIDDEN) != 0 || sprite->hidden;
         memcpy(object->previous, object->current, sizeof(object->previous));
         float yaw = voxel ? sprite->yaw : facing;
+        if (player && !voxel) yaw = sprite->yaw + pi_value * 0.5f;
         float cosine = cosf(yaw), sine = sinf(yaw);
-        float anchor = voxel ? (sprite->ceiling ? scene->sectors[sprite->sector].ceiling :
-            scene->sectors[sprite->sector].floor) : sprite->position.y;
+        float anchor = sprite->position.y;
+        if (player) anchor += voxel ? 0 : renderer->player_floor_offset;
+        else if (voxel) anchor = sprite->ceiling ? scene->sectors[sprite->sector].ceiling :
+            scene->sectors[sprite->sector].floor;
         const float matrix[16] = {cosine, 0, -sine, 0, 0, 1, 0, 0, sine, 0, cosine, 0,
             sprite->position.x, anchor, sprite->position.z, 1};
         memcpy(object->current, matrix, sizeof(matrix));
@@ -1608,8 +1625,8 @@ static bool build_sprites(Renderer *renderer, const Scene *scene, const RenderCa
         object->mesh[1] = voxel ? scene->voxel_asset : sprite->asset;
         object->mesh[2] = (voxel ? OBJECT_VOXEL : 0u) | (sprite->fullbright ? OBJECT_FULLBRIGHT : 0u) |
             (sprite->hidden ? OBJECT_HIDDEN : 0u);
-        object->mesh[3] = sprite->fullbright ? 0 : sector_shade(&scene->sectors[sprite->sector]);
-        crosses_planes |= sprite_crosses_planes(scene, sprite);
+        object->mesh[3] = player || sprite->fullbright ? 0 : sector_shade(&scene->sectors[sprite->sector]);
+        if (!player) crosses_planes |= sprite_crosses_planes(scene, sprite);
     }
     return crosses_planes;
 }
@@ -1738,7 +1755,7 @@ static void create_ray_lighting(Renderer *renderer, const Scene *scene) {
     ray->enabled = true;
     ray->triangles = (uint32_t)(renderer->scene_vertex_count / 3);
     ray->mesh_count = scene->asset_count * 2 + 1;
-    ray->instance_count = (uint32_t)scene->sprite_count + 1;
+    ray->instance_count = (uint32_t)renderer->object_count;
     ray->meshes = allocate(ray->mesh_count, sizeof(*ray->meshes));
     ray->create = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(renderer->device, "vkCreateAccelerationStructureKHR");
     ray->destroy = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(renderer->device, "vkDestroyAccelerationStructureKHR");
@@ -1921,10 +1938,11 @@ static void update_ray_lighting(Renderer *renderer, const Scene *scene, const Re
     VkAccelerationStructureInstanceKHR *instances = ray->instances.mapped;
     for (size_t index = 0; index < ray->instance_count; ++index) {
         const ObjectFrame *object = &renderer->objects[index];
-        size_t mesh_index = index ? (size_t)scene->sprites[index - 1].asset * 2 +
+        const Sprite *sprite = index ? shadow_sprite(renderer, scene, index - 1) : NULL;
+        size_t mesh_index = index ? (size_t)sprite->asset * 2 +
             ((object->mesh[2] & OBJECT_VOXEL) != 0) + 1 : 0;
         VkAccelerationStructureInstanceKHR instance = {.instanceCustomIndex = (uint32_t)index & 0xffffffu,
-            .mask = index && scene->sprites[index - 1].hidden ? 0u : 255u,
+            .mask = sprite && sprite->hidden ? 0u : 255u,
             .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
             .accelerationStructureReference = ray->meshes[mesh_index].address};
         for (unsigned row = 0; row < 3; ++row)
@@ -2062,9 +2080,25 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
     }
     renderer->scene_vertex_count = vertex_count;
     renderer->sprite_offset = vertex_count;
+    renderer->player_shadow = (Sprite){.asset = UINT32_MAX, .hidden = true};
+    for (size_t index = 0; index < scene->asset_count; ++index) {
+        const Asset *asset = &scene->assets[index];
+        if (strcmp(asset->name, "PLAYA1")) continue;
+        renderer->player_shadow.asset = (uint32_t)index;
+        renderer->player_floor_offset = asset_floor_offset(asset);
+        break;
+    }
+    renderer->object_count = scene->sprite_count + 1 + (renderer->player_shadow.asset != UINT32_MAX);
+    if (renderer->ray_lighting) {
+        if (renderer->player_shadow.asset == UINT32_MAX)
+            puts("Player shadow unavailable: PLAYA1 missing; reconvert this prepared map with the current wad-convert");
+        else
+            printf("Player shadow: %s PLAYA1 (ray-only)\n",
+                scene_sprite_voxel(scene, &renderer->player_shadow) ? "voxel" : "sprite");
+    }
     renderer->sprite_meshes = allocate(scene->asset_count * 2, sizeof(*renderer->sprite_meshes));
-    for (size_t index = 0; index < scene->sprite_count; ++index) {
-        const Sprite *sprite = &scene->sprites[index];
+    for (size_t index = 0; index + 1 < renderer->object_count; ++index) {
+        const Sprite *sprite = shadow_sprite(renderer, scene, index);
         bool voxel = scene_sprite_voxel(scene, sprite) != NULL;
         for (uint32_t frame = 0; frame <= sprite->frame_count; ++frame) {
             uint32_t asset = frame == sprite->frame_count ? sprite->asset : sprite->frames[frame].asset;
@@ -2086,7 +2120,7 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
     renderer->vertex_capacity = renderer->hud_offset + MAX_HUD_VERTICES;
     if (renderer->vertex_capacity > UINT64_MAX / sizeof(GpuVertex)) fail("Renderer vertex buffer is too large");
     renderer->vertices = allocate(renderer->vertex_capacity, sizeof(*renderer->vertices));
-    renderer->objects = allocate(scene->sprite_count + 1, sizeof(*renderer->objects));
+    renderer->objects = allocate(renderer->object_count, sizeof(*renderer->objects));
     build_sprite_meshes(renderer, scene);
     renderer->previous_scene_positions = allocate(renderer->scene_vertex_count, sizeof(*renderer->previous_scene_positions));
     char font_character[2] = {' ', '\0'};
@@ -2105,7 +2139,7 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
     renderer->vertex_upload = create_buffer(renderer, vertex_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
-    VkDeviceSize object_bytes = (scene->sprite_count + 1) * sizeof(ObjectFrame);
+    VkDeviceSize object_bytes = renderer->object_count * sizeof(ObjectFrame);
     renderer->object_buffer = create_buffer(renderer, object_bytes,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
     renderer->object_upload = create_buffer(renderer, object_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

@@ -287,7 +287,7 @@ void convert_voxels(Scene *scene, const char *directory, const char *const *defi
     for (size_t index = 0; index < scene->asset_count; ++index) {
         const VoxelRule *rule = &rules[index];
         if (!rule->model[0]) continue;
-        bool sprite_asset = false;
+        bool sprite_asset = !strcmp(scene->assets[index].name, "PLAYA1");
         for (size_t sprite = 0; sprite < scene->sprite_count; ++sprite) {
             const Sprite *thing = &scene->sprites[sprite];
             sprite_asset |= thing->asset == index;

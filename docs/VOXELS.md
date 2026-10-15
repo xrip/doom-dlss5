@@ -90,6 +90,24 @@ selects a prepared mesh rather than rewriting vertices. Ray queries reuse
 one static BLAS per pose with actor transforms in a small TLAS. Only moving
 world geometry needs BLAS refits. Both sprite quads and models use this path.
 
+The player adds one shadow-only instance using `PLAYA1`. With a prepared
+player model it uses the voxel mesh; otherwise it uses the alpha-tested
+sprite. Both follow the player's feet and yaw, not camera pitch or view
+bob. The fallback is a flat, body-facing sprite. This idle pose is never
+drawn into color, depth, motion, or reconstruction material buffers. Noclip
+and overview hide it. No extra light or render pass is added.
+
+The converter imports `PLAYA1` as an asset, not as a map actor. Reconvert
+older prepared maps to include it; WAD input refreshes its cache when the
+converter changes. WADs without this patch still load, without a player
+shadow. The native map and voxel formats are unchanged.
+
+Startup prints `Player shadow: voxel PLAYA1 (ray-only)` or the sprite
+equivalent. `Player shadow unavailable` means the prepared map needs a
+fresh conversion. Ray lighting must be on (`L`); in dark areas without a
+direct light there is no direct-light shadow. Mouse look works up/down in
+walk mode too, so nearby shadows can be seen below eye level.
+
 This removes per-actor mesh copies and the previous whole-level refit on
 camera/animation changes. Native packs have an eight-million-vertex bound;
 the shared vertex pool has a sixteen-million-vertex bound. Memory grows

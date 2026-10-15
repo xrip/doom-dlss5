@@ -95,6 +95,7 @@ Scene scene_read(const char *path);
 void scene_write_voxels(const Scene *scene, const char *path);
 void scene_read_voxels(Scene *scene, const char *path);
 const VoxelMesh *scene_sprite_voxel(const Scene *scene, const Sprite *sprite);
+float asset_floor_offset(const Asset *asset);
 void scene_free(Scene *scene);
 void scene_print(const Scene *scene);
 void scene_tick_sprites(Scene *scene);

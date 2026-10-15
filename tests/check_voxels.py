@@ -40,11 +40,12 @@ def main():
         things = dict(lumps)["THINGS"] + struct.pack("<hhHHH", 48, 64, 90, 2011, 7)
         lumps = [(key, things if key == "THINGS" else data) for key, data in lumps]
         lumps.append(("STIMA0", dict(lumps)["PATCH"]))
+        lumps.append(("PLAYA1", dict(lumps)["PATCH"]))
         wad, scene, model, definition = [root / name for name in ("test.wad", "test.drmap", "test.kvx", "VOXELDEF")]
         wad.write_bytes(make_wad(lumps))
         original = kvx()
         model.write_bytes(original)
-        definition.write_text('/* two keys, one unused */ STIM XXXX = "test" { Scale = 2 AngleOffset = 270 PlacedSpin = 10 UseActorPitch }\n')
+        definition.write_text('/* two keys, one unused */ STIM XXXX = "test" { Scale = 2 AngleOffset = 270 PlacedSpin = 10 UseActorPitch }\nPLAYA = "test" {}\n')
         base = [converter, str(wad), str(scene)]
         run(base)
         original_scene = scene.read_bytes()
@@ -55,6 +56,7 @@ def main():
         valid_pack = pack.read_bytes()
         meshes, actors = read_pack(valid_pack)
         count, spin, points = meshes["STIMA0"]
+        assert meshes["PLAYA1"][0] == 36, "player model is imported without adding a map actor"
         assert count == 36, "adjacent equal-color cells must merge to six exterior quads"
         assert spin == 10 and len(actors) == 1 and math.isclose(actors[0][1], math.pi / 2, abs_tol=1e-6)
         for axis, expected in enumerate(((-1 / 16, 1 / 16), (0, 1 / 16), (0, 1 / 16))):

@@ -1,5 +1,33 @@
 # PoC validation
 
+## Player shadow
+
+The Clang build and all 22 non-NGX tests pass (`build/player-shadow-suite.log`).
+Generated GPU fixtures check player voxel shadows with transparent sprite
+texels, alpha-tested sprite fallback, yaw, horizontal/vertical motion,
+noclip hiding, and unchanged raster color/motion with ray lighting off.
+CPU checks cover player model import without an extra map actor and shared
+sprite floor anchoring below transparent patch rows.
+
+Real MAP01 WAD input renders four frames in each mode with synchronization
+validation and `--no-ngx` (`build/player-shadow-voxel.log` and
+`build/player-shadow-sprite.log`). Both use 45 ray instances: world, 43 map
+objects, and one hidden-from-raster player. The local player model has
+11,794 triangles and a foot-relative height of 1.75 world units. NGX was
+not run; the body uses its idle pose in both paths.
+
+Walking mouse look now accepts vertical input, with limits of +/-89 degrees.
+A local harness calling the real input path checks upward/downward camera
+targets, both limits, mouse release, noclip, and unchanged player feet.
+The old `build/MAP01.drmap` lacked `PLAYA1`; it was reconverted. Startup
+now reports the selected player caster or tells the user to reconvert.
+First-person MAP01 courtyard captures at a 70-degree downward pitch show
+the voxel player's shadow (`build/player-courtyard-on.png`, versus
+`build/player-courtyard-off.png`; 144,544 changed pixels at 1280x800).
+The enclosed start-room floor has no direct light at the tested pose, so
+its ambient-only image does not change when the caster is hidden. No fake
+player-following light or shadow blob was added.
+
 ## Voxel performance and WAD cache
 
 ### Moving MAP13 regression

@@ -457,6 +457,52 @@ static void check_ray_shadows(GLFWwindow *window) {
     pixels = renderer_pixels(renderer, &width, &height);
     expect(lit_blue > pixels[sample + 2] + 8, "hiding an emitter removes its colored light");
     renderer_destroy(renderer);
+
+    scene.sprite_count = 0;
+    memcpy(assets[3].name, "PLAYA1", 7);
+    for (unsigned variant = 0; variant < 5; ++variant) {
+        bool model = variant == 1 || variant == 2;
+        assets[3].voxel = model ? (VoxelMesh){.count = 6, .vertices = voxel_vertices} : (VoxelMesh){0};
+        assets[3].pixels = variant == 1 || variant == 3 ? sprite_cutout : sprite_texels;
+        options.ray_lighting = variant != 2 && variant != 4;
+        renderer = renderer_create(window, &scene, options);
+        renderer_set_player(renderer, NULL, 0);
+        unsigned absent = shadow_sample(renderer, &scene, &specials, &camera);
+        uint32_t player_width, player_height;
+        const uint8_t *player_pixels = renderer_pixels(renderer, &player_width, &player_height);
+        size_t player_bytes = (size_t)player_width * player_height * 4;
+        uint8_t *without_player = allocate(player_bytes, 1);
+        memcpy(without_player, player_pixels, player_bytes);
+        Position feet = {0, 0, 0};
+        renderer_set_player(renderer, &feet, 0);
+        unsigned present = shadow_sample(renderer, &scene, &specials, &camera);
+        if (variant == 3) {
+            expect(abs((int)present - (int)absent) <= 2, "transparent player sprite texels do not cast a solid shadow");
+        } else if (options.ray_lighting) {
+            expect(absent > present + 20, model ? "player voxel casts an opaque shadow despite sprite cutouts" :
+                "player sprite fallback casts an alpha-tested shadow");
+            renderer_set_player(renderer, &feet, 1.5707963268f);
+            unsigned turned = shadow_sample(renderer, &scene, &specials, &camera);
+            expect(turned > present + 20, "player yaw rotates its shadow, not the camera-facing billboard");
+            feet.x = 10;
+            renderer_set_player(renderer, &feet, 0);
+            unsigned moved_player = shadow_sample(renderer, &scene, &specials, &camera);
+            expect(abs((int)moved_player - (int)absent) <= 2, "player shadow follows the feet position");
+            feet = (Position){0, 3, 0};
+            renderer_set_player(renderer, &feet, 0);
+            unsigned raised = shadow_sample(renderer, &scene, &specials, &camera);
+            expect(abs((int)raised - (int)absent) <= 2, "player shadow follows vertical motion, not sector floor");
+            renderer_set_player(renderer, NULL, 0);
+            unsigned hidden_player = shadow_sample(renderer, &scene, &specials, &camera);
+            expect(abs((int)hidden_player - (int)absent) <= 2, "noclip removes the player shadow");
+        } else {
+            player_pixels = renderer_pixels(renderer, &player_width, &player_height);
+            expect(!memcmp(without_player, player_pixels, player_bytes), "shadow-only player never enters raster color");
+            expect_static(renderer, "shadow-only player never enters raster motion");
+        }
+        free(without_player);
+        renderer_destroy(renderer);
+    }
     specials_free(&specials);
 }
 

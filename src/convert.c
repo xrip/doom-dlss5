@@ -650,15 +650,7 @@ static void make_things(Converter *converter) {
         if (image->flags & 2) {
             position.y = (float)read_i16(data + 2) / 32 - (float)patch->top / 32;
         } else {
-            for (uint32_t row = patch->height; row > 0; --row) {
-                bool visible = false;
-                for (uint32_t column = 0; column < patch->width; ++column)
-                    visible = visible || patch->pixels[((size_t)(row - 1) * patch->width + column) * 4 + 3] != 0;
-                if (visible) {
-                    position.y += ((float)row - (float)patch->top) / 32;
-                    break;
-                }
-            }
+            position.y += asset_floor_offset(patch);
         }
         scene->sprites[scene->sprite_count++] = (Sprite){.asset = asset,
             .sector = sector_index, .position = position, .ceiling = (image->flags & 2) != 0,
@@ -790,6 +782,12 @@ static Converter convert_map(const char *path, const char *map) {
     verify_areas(&converter);
     make_walls(&converter);
     make_things(&converter);
+    for (size_t index = 0; index < converter.wad.count; ++index) {
+        if (!strncmp(converter.wad.lumps[index].name, "PLAYA1", 6)) {
+            get_asset(&converter, "PLAYA1", 2);
+            break;
+        }
+    }
     return converter;
 }
 

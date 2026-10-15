@@ -13,6 +13,7 @@ typedef struct {
 
 Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOptions options);
 bool renderer_set_ray_lighting(Renderer *renderer, bool enabled);
+void renderer_set_player(Renderer *renderer, const Position *feet, float yaw);
 bool renderer_set_ray_reconstruction(Renderer *renderer, bool enabled);
 void renderer_text(Renderer *renderer, const char *text, int horizontal, int vertical);
 void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,

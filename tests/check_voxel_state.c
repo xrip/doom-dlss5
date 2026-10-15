@@ -11,6 +11,11 @@ static void expect(bool condition, const char *message) {
 }
 
 int main(void) {
+    uint8_t patch_pixels[2 * 3 * 4] = {0};
+    Asset patch = {.width = 2, .height = 3, .top = 1, .pixels = patch_pixels};
+    expect(asset_floor_offset(&patch) == 0, "empty sprite has no floor adjustment");
+    patch_pixels[(1 * 2 + 1) * 4 + 3] = 255;
+    expect(asset_floor_offset(&patch) == 1.0f / 32, "sprite feet ignore transparent bottom rows and patch origin");
     Asset assets[2] = {{.voxel = {.count = 36, .spin = 10}}, {0}};
     Sprite sprite = {.yaw = 1.5707963268f};
     Scene scene = {.assets = assets, .asset_count = 2, .sprites = &sprite, .sprite_count = 1};

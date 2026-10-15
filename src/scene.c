@@ -439,6 +439,15 @@ void scene_read_voxels(Scene *scene, const char *path) {
     }
 }
 
+float asset_floor_offset(const Asset *asset) {
+    for (uint32_t row = asset->height; row > 0; --row) {
+        for (uint32_t column = 0; column < asset->width; ++column)
+            if (asset->pixels[((size_t)(row - 1) * asset->width + column) * 4 + 3])
+                return ((float)row - (float)asset->top) / 32;
+    }
+    return 0;
+}
+
 const VoxelMesh *scene_sprite_voxel(const Scene *scene, const Sprite *sprite) {
     if (sprite->asset >= scene->asset_count) return NULL;
     const VoxelMesh *mesh = &scene->assets[sprite->asset].voxel;

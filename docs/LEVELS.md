@@ -116,7 +116,7 @@ New-Item -ItemType Directory -Force ./build/cache/manual | Out-Null
 
 ## Controls and scope
 
-- `W`, `A`, `S`, `D` walk; the mouse turns the view.
+- `W`, `A`, `S`, `D` walk; the mouse looks left/right and up/down (up to 89 degrees).
 - `Left Shift` runs. `E` or `Space` uses doors, lowering floor switches, and returning lifts; walk triggers activate on crossing.
 - Left click activates gun-trigger doors. It does not fire a weapon or start combat.
 - Keys and skulls are picked up by proximity. `R` returns to the player start and keeps collected keys.
