@@ -18,6 +18,23 @@ only the prepared scene: it has no WAD parser or tessellator.
 
 ## Build and run
 
+Open a WAD directly; maps, music, and optional voxel meshes are prepared
+on demand in `cache/<key>/` beside the executable:
+
+```powershell
+./build/doom-raylib.exe ./DOOM2.WAD MAP07
+./build/doom-raylib.exe ./DOOM2.WAD --prepare-all --voxels
+```
+
+The second command fills all 32 cache entries without starting Vulkan/NGX.
+WAD mode uses local voxel sources when found; `--no-voxels` keeps sprites.
+Level changes prepare the next map automatically. Direct `.drmap` input
+and the separate conversion tools still work.
+
+Optional 3D voxel replacements: [VOXELS.md](docs/VOXELS.md).
+Use `run-map.ps1 -Voxels` to convert local KVX assets and enable them;
+direct `.drmap` runs keep sprites unless `--voxels` is set.
+
 Need CMake 3.28+, Ninja, Git, Clang 19+, and the Vulkan SDK with `glslc`.
 Windows also needs the Visual Studio C++ Build Tools and Windows SDK.
 The first CMake run downloads pinned GLFW, stb, and libtess2 sources.
@@ -30,19 +47,18 @@ From PowerShell in this folder, with Clang on PATH:
 $env:PATH = 'C:/Program Files/LLVM/bin;' + $env:PATH
 cmake --preset clang
 cmake --build --preset clang
-ctest --preset clang
-./build/doom-raylib.exe ./build/MAP01.drmap
+ctest --preset clang -LE ngx
+./build/doom-raylib.exe ./DOOM2.WAD MAP01
 ```
 
-If `DOOM2.WAD` is in the source folder, the build runs the converter.
-CMake runs it again only when the WAD or converter changes. No game
+If `DOOM2.WAD` is in the source folder, the build prepares its test scene
+under `build/cache/tests`. CMake updates it when the WAD or converter changes. No game
 assets are in the source code; WADs and prepared scenes are local files.
 
 For a WAD at another path:
 
 ```powershell
-./build/wad-convert.exe C:/Games/Doom2/DOOM2.WAD ./build/MAP01.drmap
-./build/doom-raylib.exe ./build/MAP01.drmap
+./build/doom-raylib.exe C:/Games/Doom2/DOOM2.WAD MAP01
 ```
 
 On Linux, with Clang, Ninja, and the GLFW desktop development packages:
@@ -50,8 +66,8 @@ On Linux, with Clang, Ninja, and the GLFW desktop development packages:
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
-ctest --test-dir build --output-on-failure
-./build/doom-raylib ./build/MAP01.drmap
+ctest --test-dir build --output-on-failure -LE ngx
+./build/doom-raylib ./DOOM2.WAD MAP01
 ```
 
 ## Controls
@@ -94,28 +110,35 @@ can view scenes and export MIDI but do not have this playback backend.
 See [MUSIC.md](docs/MUSIC.md) for format and playback details.
 
 ```powershell
-./build/doom-raylib.exe ./build/MAP01.drmap --inspect
-./build/doom-raylib.exe ./build/MAP01.drmap --frames 2 --screenshot ./build/map01-start.png
-./build/doom-raylib.exe ./build/MAP01.drmap --overview --frames 2 --screenshot ./build/map01-overview.png
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --inspect
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --no-ngx --frames 2 --screenshot ./build/map01-start.png
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --no-ngx --overview --frames 2 --screenshot ./build/map01-overview.png
 ```
 
 Finite frame runs use a hidden window, but still need a Vulkan 1.3 GPU
 and driver. `--inspect` does not open a window. `--validation` enables
 the Vulkan validation layer from the SDK.
 
-DLSS starts enabled when built in, with style 1 and two NR passes.
-FG starts disabled; ray lighting starts enabled.
+DLSS starts in NR+SR mode when built in, with style 1 and two NR passes.
+F10 selects the separate Ray Reconstruction path.
+RR and NR+SR never run together. FG starts disabled; ray lighting starts enabled.
 Use `--no-dlss`, `--no-fg`, or `--no-ray-lighting` to start with an effect off.
-F5 switches DLSS (NR + SR), F9 switches FG, and L switches ray lighting.
+F5 switches DLSS, F9 switches FG, and L switches ray lighting.
+F12 switches fullscreen; `--fullscreen` starts there.
 GPU resources stay available for live switching, including when an effect starts off.
 DLSS neural rendering works through the public NGX SDK and a
-separate NR runtime. `--dlss5` is an alias for `--dlss`. Use F6 to toggle NR,
+separate NR runtime. `--dlss5` explicitly selects NR+SR; `--dlss` enables
+the selected DLSS mode. In NR+SR mode, use F6 to toggle NR,
 F7 for style, and F8 for 1/2/4 passes. SR defaults to performance mode;
-use `--sr off` for native-resolution NR, or `--sr quality|balanced`.
+use `--sr off` for native processing, or `--sr quality|balanced` for another model hint.
+The scene always renders at 640x480; the window size is the upscale target.
+FG uses final display-size color frames, with 640x480 depth and motion.
+Use `--no-rr` for NR+SR or `--no-rr --no-nr` for SR alone.
 Extra passes cost extra GPU work and can amplify artifacts.
 Direct NGX frame generation needs a build with
 `DOOM_FRAME_GENERATION=ON`. The HUD distinguishes render FPS from FG mode.
-Ray lighting provides dynamic ray-query shadows and sector-derived lights;
+Ray lighting provides alpha-aware world and sprite shadows, light from
+sectors brighter than their neighbors, and colored glowing-sprite lights;
 `L` restores classic lighting. `--no-vsync` allows uncapped native rendering.
 See [VULKAN.md](docs/VULKAN.md) for setup, the runtime filename workaround,
 GPU checks, and limits. This is an experimental community integration.

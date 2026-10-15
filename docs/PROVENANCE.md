@@ -1,7 +1,14 @@
 # Implementation sources
 
 The project uses public format descriptions and library APIs. No Doom
-engine source or renderer port source was used to write this PoC.
+engine or renderer port code is included in this PoC. The optional voxel
+format and definition behavior were checked against the references below;
+the converter and mesher are independently written.
+
+- [Ken Silverman's SLAB6 format notes](https://www.advsys.net/ken/slab6.zip): KVX mip layout, offsets, pivots, surface runs, and palettes.
+- [GZDoom voxel definitions](https://github.com/ZDoom/gzdoom/blob/master/src/r_data/voxeldef.cpp): definition keys and angle/spin conventions.
+- [GZDoom voxel format reference](https://github.com/ZDoom/gzdoom/blob/master/src/common/models/models_voxel.cpp): exposed-face directions and pivot/axis convention, checked as format behavior; no implementation code was copied.
+- [GZDoom model coordinate convention](https://github.com/ZDoom/gzdoom/blob/master/src/r_data/models.cpp): actor yaw and local-angle composition, used to check the conversion to this project's negative-map-Y world axis.
 
 - [Kaitai Doom WAD format](https://github.com/kaitai-io/kaitai_struct_formats/blob/master/game/doom_wad.ksy): WAD directory, classic map records, PNAMES, and texture descriptions.
 - [Doom Wiki picture format](https://doomwiki.org/wiki/Picture_format): column posts, patch offsets, and gaps.
@@ -15,6 +22,8 @@ engine source or renderer port source was used to write this PoC.
 - [GLFW](https://www.glfw.org/docs/latest/): windows, input, and Vulkan surfaces.
 - [stb](https://github.com/nothings/stb): PNG screenshots and HUD text.
 - [NVIDIA public NGX SDK](https://github.com/NVIDIA/DLSS/tree/374959484e79a640feaba44c93ac8cfb0a03f5b5): Vulkan resources, parameter API, and custom project identification.
+- [NVIDIA RR integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_RR.md): reconstruction inputs, linear depth, albedos, normals, and output resolution.
+- [NVIDIA FG integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md): final-resolution color/UI inputs, render-resolution depth/motion, and UI recomposition.
 - [bevy_dlss5](https://github.com/AlrikOlson/bevy_dlss5/tree/28be5dc1b4b907ddba63a0c73d531e629809a865): discovered NR Vulkan exports, runtime initialization, and parameter keys. The C++ adapter is independently written against that call contract.
 - [Measured NR controls](https://github.com/Echo-Storm/ls-addon-manager/blob/main/addons/DLSS5NR01/docs/dlssnr-knobs.md): observed style, structure, mask, and repeated-pass behavior for runtime 310.8.
 - [libtess2](https://github.com/memononen/libtess2): sector contour tessellation, used only by the converter.

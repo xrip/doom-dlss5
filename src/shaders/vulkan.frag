@@ -22,8 +22,15 @@ layout(location = 1) in vec3 worldPosition;
 layout(location = 2) flat in vec2 fragMaterial;
 layout(location = 3) in vec4 currentClip;
 layout(location = 4) in vec4 previousClip;
+layout(location = 5) flat in uint fragObject;
 layout(location = 0) out vec4 color;
 layout(location = 1) out vec2 motion;
+#ifdef RAY_RECONSTRUCTION
+layout(location = 2) out vec4 noisyRadiance;
+layout(location = 3) out vec4 diffuseAlbedo;
+layout(location = 4) out vec4 normalsRoughness;
+layout(location = 5) out float linearDepth;
+#endif
 
 #ifdef RAY_LIGHTING
 #include "lighting.glsl"
@@ -52,7 +59,17 @@ void main() {
     int index = int(round(sampleColor.r * 255.0));
     color = texelFetch(paletteTexture, ivec2(index, clamp(shade, 0, 31)), 0);
 #ifdef RAY_LIGHTING
-    if (rayLighting.info.y != 0u && !sky && fragMaterial.y != 2.0)
-        color = applyRayLighting(color, texelFetch(paletteTexture, ivec2(index, 0), 0), worldPosition, worldNormal);
+    vec4 baseColor = texelFetch(paletteTexture, ivec2(index, 0), 0);
+    vec3 radiance = decodePaletteSrgb(color.rgb);
+    if (rayLighting.info.y != 0u && !sky && fragMaterial.y != 2.0) {
+        radiance = rayLightingRadiance(color, baseColor, worldPosition, worldNormal);
+        color.rgb = encodePaletteSrgb(clamp(radiance, 0.0, 1.0));
+    }
+#ifdef RAY_RECONSTRUCTION
+    noisyRadiance = vec4(radiance, 1.0);
+    diffuseAlbedo = vec4(sky ? vec3(0.0) : decodePaletteSrgb(baseColor.rgb), 1.0);
+    normalsRoughness = vec4(sky ? vec3(0.0) : worldNormal, 1.0);
+    linearDepth = sky ? 10000.0 : currentClip.w;
+#endif
 #endif
 }

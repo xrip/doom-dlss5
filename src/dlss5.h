@@ -42,6 +42,27 @@ typedef struct DoomDlss5Frame {
     uint32_t pass;
 } DoomDlss5Frame;
 
+typedef struct DoomDlss5ReconstructionFrame {
+    DoomDlss5Image color;
+    DoomDlss5Image motion;
+    DoomDlss5Image depth;
+    DoomDlss5Image diffuse_albedo;
+    DoomDlss5Image specular_albedo;
+    DoomDlss5Image normals_roughness;
+    DoomDlss5Image output;
+    DoomDlss5SRMode mode;
+    float jitter_x_pixels;
+    float jitter_y_pixels;
+    bool reset_history;
+} DoomDlss5ReconstructionFrame;
+
+bool doom_dlss5_reconstruct(
+    DoomDlss5 *dlss5,
+    VkCommandBuffer command_buffer,
+    const DoomDlss5ReconstructionFrame *frame,
+    char *error,
+    size_t error_capacity);
+
 typedef struct DoomDlss5InitInfo {
     VkInstance instance;
     VkPhysicalDevice physical_device;
@@ -70,13 +91,6 @@ bool doom_dlss5_get_device_extensions(
 bool doom_dlss5_create(
     const DoomDlss5InitInfo *info,
     DoomDlss5 **out_dlss5,
-    char *error,
-    size_t error_capacity);
-bool doom_dlss5_render_size(
-    DoomDlss5 *dlss5,
-    DoomDlss5SRMode mode,
-    VkExtent2D output_extent,
-    VkExtent2D *work_extent,
     char *error,
     size_t error_capacity);
 bool doom_dlss5_upscale(

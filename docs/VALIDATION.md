@@ -1,5 +1,195 @@
 # PoC validation
 
+## Voxel performance and WAD cache
+
+### Moving MAP13 regression
+
+The static timings below did not cover walking/animation. A native-only
+hidden-window benchmark now moves the camera each frame and ticks sprite
+animation once per four frames. The first 16 of 128 frames are warm-up;
+work size is 640x480, output 640x360, VSync/validation/NGX are off.
+
+| MAP13 | Mean before | p95 before | Max before | Mean after | p95 after | Max after |
+| --- | --- | --- | --- | --- | --- | --- |
+| Ray off | 5.722 ms | 12.574 ms | 101.432 ms | 1.352 ms | 1.527 ms | 2.955 ms |
+| Ray on | 9.219 ms | 17.735 ms | 113.344 ms | 1.681 ms | 2.071 ms | 3.665 ms |
+
+Shared local pose meshes, GPU current/previous transforms, and static pose
+BLASes replace per-actor CPU geometry updates and the combined BLAS refit.
+The TLAS selects each actor's current pose/transform. A longer 512-frame
+ray-on run gives 1.584 ms mean, 1.792 ms p95, 4.011 ms max. The same run
+passes synchronization validation (validation overhead is excluded from
+the performance numbers). Repeated pose/hidden cycles have shadow checks.
+The fixed MAP01 capture is pixel-identical to the earlier CPU-vertex image.
+
+```powershell
+./build/check-renderer.exe ./build/cache/dbde6066a9b83e55/MAP13.drmap --voxels --benchmark 512 --ray-lighting
+```
+
+The cache key above is this build's local key. The benchmark is deliberately
+native-only; these are not NR/RR/FG results or a guarantee for every camera path.
+
+### Static baseline and cache checks
+
+The final build uses only `build/` for binaries. Native runtime checks use
+that full-featured executable with `--no-ngx`, not a second build tree.
+Test scene fixtures are under `build/cache/tests/`.
+All 22 selected CPU/native-Vulkan checks pass (`build/yagni-final-root.log`);
+NGX GPU tests are deliberately excluded.
+
+Static MAP01, RTX 5060 Ti, 640x480 work size, 1280x800 output, 120 real
+frames with 16 warm-up frames, no VSync/music/HUD/readback/validation:
+
+| Native path | Before | After |
+| --- | --- | --- |
+| Voxels + ray lighting, mean real frame | 20.196 ms | 0.963 ms |
+| GPU world stage | 10.186 ms | 0.330 ms |
+
+This intermediate change skipped unchanged object transforms/uploads and
+used one device-local raster/ray vertex buffer. Shared poses now replace
+its per-actor mesh copies, as measured above. An opaque/culling shader
+trial had no clear gain and was removed. This static result is not an
+interactive animation benchmark or an NR/RR/FG performance claim.
+
+`wad-preparation` uses generated two-map WAD/KVX/MUS fixtures and a copied
+viewer/converter in a path with spaces. It checks cache hits, missing
+outputs, completion markers, WAD/definition/model changes, map selection,
+voxel opt-in/out, and clean errors. It runs `--inspect`, never GPU/NGX.
+
+The real WAD prewarm converted all 32 voxel levels into
+`build/cache/dbde6066a9b83e55/`; a second pass reported 32 cache hits and zero
+conversions. All 32 cached native sidecars load. `build/doom-raylib.exe
+DOOM2.WAD MAP07 --no-ngx --frames 4 --validation --no-music` uses that cache
+and renders cleanly with synchronization validation. No updater processes
+remain. The cache key is local/build-specific, not a fixed path contract.
+All 32 cached voxel levels also render two frames each, sequentially, with
+ray lighting, synchronization validation, and `--no-ngx`. The native
+all-map CTest path now explicitly uses `--no-ngx` too; `ctest -LE ngx`
+includes it and excludes all NGX-labeled tests.
+
+A generated two-map exit fixture also passes the real interactive
+use/Enter path from MAP01 to MAP02 with automatic preparation. The same
+`--no-ngx` process passes F12 fullscreen/windowed, maximize, minimize,
+restore, and close (`build/root-wad-window.out.log` and `.err.log`).
+
+## Optional voxel models
+
+The facing regression uses an asymmetric pivot and checks implicit/default
+facing, explicit zero, and 90/180/270 degree offsets. It fails with the old
+mirrored raw-Y conversion and passes with `(x-pivotX, pivotZ-z, y-pivotY)`
+before yaw. Triangle winding changes with the axis sign and remains outward.
+Existing prepared packs must be regenerated; their vertex positions are
+already baked. No per-model facing overrides were added.
+
+The earlier Clang C23 build without NGX/FG passed 19 focused CPU/native-Vulkan
+checks (`build/voxel-native-checks.log`). New checks cover KVX slab/table
+bounds, exposed faces, greedy merging, outward triangle winding, scale,
+pivots, palette remapping, yaw, definition precedence, missing models,
+sidecar rejection, 35 Hz spin, and whole-animation sprite fallback.
+
+Native ray fixtures verify opaque model shadows despite transparent source
+sprite texels, floor anchoring independent of sprite baseline, moved/hidden
+models, self-shadowing within one mesh, and shared-pose selection. Existing sprite
+and plane-occlusion checks still pass.
+
+All 32 original maps convert with the two local voxel definitions, and all
+32 native sidecars load with `--inspect --voxels`. A real MAP01 native ray
+capture passes synchronization validation: 21 frame meshes replace all
+43 objects (`build/voxel-map01-native.png`). The resulting image was
+visually checked. The updater process count remained zero.
+
+Before shared poses, MAP19 reserved about 9.7 million per-actor vertices
+and rendered two native ray-lit frames with synchronization validation
+(`build/voxel-map19-native.log`). This historical capacity check is not a
+performance claim. The current renderer no longer makes those mesh copies.
+
+The NGX-enabled target builds, including voxel-capable RR/NR/SR/FG paths,
+but those runtimes were not executed again because of the updater incident.
+RR/FG appearance and performance with voxel meshes remain unverified.
+
+## YAGNI review
+
+The full Clang build passes all 28 CTest checks, including every Doom II
+map through native, NR+SR, FG, ray+NR+SR+FG, and RR+FG paths
+(`build/yagni-final-ctest.log`). The C23 build without NGX/FG passes all
+15 CPU checks.
+
+The review found that one overflowing sprite disabled plane occlusion for
+all sprites. Wall-only depth is now limited to overflowing sprites; the
+others draw against the merged world/sprite depth. A regression checks that
+a normal sprite behind a floor stays hidden when an offscreen sprite
+overflows its own ceiling (`build/yagni-sprite-regression.log`).
+
+The final focused rerun passed all eight CPU/GPU fixture checks, but its
+32-map RR repeat was stopped after NVIDIA's updater accumulated about
+3,095 `nvngx_update.exe` processes (47.6 GB summed working sets). The tests
+had repeatedly launched NGX; driver updater children outlived the games.
+The test tree and updater processes were terminated, and the remaining
+updater count was zero. No driver or system registry settings were changed.
+Do not repeat NGX batch tests until updater containment is addressed.
+
+## DLSS5 startup mode
+
+Startup again selects the requested NR+SR preset: style 1, two passes,
+ray lighting on, and FG off. `--dlss5` explicitly selects NR+SR; `--rr`
+or F10 selects the separate RR path. `vulkan-default-mode` checks that
+startup executes NR and does not accidentally select RR. GPU runs also
+checked the default, `--rr --dlss5`, and `--rr` choices with validation.
+
+## MAP07 Mancubus ceiling clipping
+
+FATTA1 is 73x65 and FATTB1 is 88x70; with floor anchoring their tops reach
+129 and 134 Doom units in MAP07 rooms with ceiling 128. Quad sizes were
+already current; the world ceiling depth clipped the artwork.
+Sprites crossing a sector plane now use alpha-tested wall-only depth,
+then merge their visible depth back for NR/RR/FG. The ordinary path remains
+unchanged for sprites that fit. WAD offsets and frame scale are unchanged.
+
+The GPU regression compares both frames with no-ceiling references, checks
+opaque/transparent walls, and repeats transitions into/out of ceiling overflow.
+The old depth rule fails it; the fix passes native, ray-lighting, and RR+FG
+checks with synchronization validation. A real MAP07 RR capture also passes
+(`build/map07-sprite-fixed.png`). Existing converted maps need no update.
+
+## Ray reconstruction, natural lights, and fullscreen
+
+The scene render size is fixed at 640x480. RR and NR+SR are separate
+paths; FG color, HUD-less color, UI color/alpha, and generated output use
+the window/display size. RR replaces the separate SR pass. The NR choice,
+style, and pass count stay saved while RR is active.
+
+GPU fixtures cover moving/hidden/transparent sprite shadows and colored
+sprite light reaching the floor. CPU fixtures cover sector contrast,
+sky/closed sectors, animated/hidden/moving lights, palette color, and the
+32-source bound. RR checks cover DLAA/quality modes, camera motion, NR
+mode isolation after equal warm-up, resize, and FG. The 21 focused checks
+pass; all 32 maps also pass the RR+FG synchronization-validation run.
+The native-only C23 build passes all 15 CPU checks.
+
+F12 fullscreen/windowed transitions, maximize/minimize/restore, and close
+pass with RR, FG, and synchronization validation. `--fullscreen --visible
+--frames 4 --fg --validation` also starts at the monitor's 3840x2160 size
+and exits cleanly. Logs are in `build/final-rr-fullscreen.*.log`.
+
+Static MAP01, RTX 5060 Ti, 120 real frames, 16 warm-up frames, no VSync,
+music, HUD, readback, or validation during the timing runs:
+
+| Output | Mode | Mean real frame | GPU world | GPU AI | GPU SR | GPU HUD/FG |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1920x1080 | RR | 3.219 ms | 0.155 ms | 1.537 ms | 0.026 ms | 0.024 ms |
+| 1920x1080 | NR x2 + SR | 8.467 ms | 0.146 ms | 5.224 ms | 1.006 ms | 0.022 ms |
+| 3840x2160 | RR | 6.868 ms | 0.149 ms | 3.269 ms | 0.077 ms | 0.097 ms |
+| 3840x2160 | NR x2 + SR | 11.729 ms | 0.168 ms | 5.177 ms | 2.280 ms | 0.104 ms |
+| 3840x2160 | RR + FG | 13.923 ms | 0.158 ms | 3.334 ms | 0.078 ms | 5.294 ms |
+
+The 4K FG run counted 120 real and 119 generated presentations. These
+counts do not measure monitor scanout. FG has significant cost for this
+small scene; it remains off by default. `GPU-AI` is RR or NR according to
+the selected path, not both. Timing commands use `--size WIDTH HEIGHT
+--frames 120 --profile --no-vsync --no-music`, adding `--rr` for RR,
+`--dlss5` for NR+SR, and `--rr --fg` for RR+FG. The 1080p timings precede the final UI recomposition
+addition; the listed 4K timings include it.
+
 ## Reviewed Vulkan checkpoint
 
 The full Clang build passes all 23 CTest checks; the native-only C23 build

@@ -3,6 +3,7 @@
 #include "music.h"
 #include "specials.h"
 #include "renderer.h"
+#include "level_prepare.h"
 
 #include <GLFW/glfw3.h>
 #include <math.h>
@@ -188,15 +189,24 @@ int main(int argc, char **argv) {
     bool no_music = false, validation = false, dlss_enabled = false;
     bool profile = false, frame_generation = false, visible = false, ray_lighting = false;
     bool no_vsync = false;
+    bool no_neural = false;
+    bool no_ngx = false;
+    bool fullscreen = false;
+    bool voxels = false;
+    int voxel_mode = VOXELS_AUTO;
+    bool have_path = false;
+    const char *requested_map = NULL;
+    bool prepare_all = false;
 #ifdef DOOM_DLSS5
     dlss_enabled = true;
 #endif
 #ifdef DOOM_FRAME_GENERATION
-    const bool fg_available = true;
+    bool fg_available = true;
 #else
-    const bool fg_available = false;
+    bool fg_available = false;
 #endif
-    const bool dlss_available = dlss_enabled;
+    bool dlss_available = dlss_enabled;
+    bool ray_reconstruction = false;
     ray_lighting = true;
     unsigned neural_style = 1, neural_passes = 2;
     unsigned upscale_mode = 3;
@@ -207,15 +217,24 @@ int main(int argc, char **argv) {
     int frames = 0;
     for (int index = 1; index < argc; ++index) {
         if (!strcmp(argv[index], "--inspect")) inspect = true;
+        else if (!strcmp(argv[index], "--prepare-all")) prepare_all = true;
+        else if (!strcmp(argv[index], "--voxels")) voxel_mode = VOXELS_ON;
+        else if (!strcmp(argv[index], "--no-voxels")) voxel_mode = VOXELS_OFF;
         else if (!strcmp(argv[index], "--validation")) validation = true;
-        else if (!strcmp(argv[index], "--dlss") || !strcmp(argv[index], "--dlss5")) dlss_enabled = true;
+        else if (!strcmp(argv[index], "--dlss")) dlss_enabled = true;
+        else if (!strcmp(argv[index], "--dlss5")) { dlss_enabled = true; ray_reconstruction = false; }
         else if (!strcmp(argv[index], "--no-dlss")) dlss_enabled = false;
+        else if (!strcmp(argv[index], "--no-nr")) no_neural = true;
+        else if (!strcmp(argv[index], "--no-ngx")) no_ngx = true;
         else if (!strcmp(argv[index], "--profile")) profile = true;
         else if (!strcmp(argv[index], "--fg")) frame_generation = true;
         else if (!strcmp(argv[index], "--no-fg")) frame_generation = false;
         else if (!strcmp(argv[index], "--ray-lighting")) ray_lighting = true;
         else if (!strcmp(argv[index], "--no-ray-lighting")) ray_lighting = false;
+        else if (!strcmp(argv[index], "--rr")) ray_reconstruction = true;
+        else if (!strcmp(argv[index], "--no-rr")) ray_reconstruction = false;
         else if (!strcmp(argv[index], "--no-vsync")) no_vsync = true;
+        else if (!strcmp(argv[index], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[index], "--visible")) visible = true;
         else if (!strcmp(argv[index], "--sr") && index + 1 < argc) {
             const char *mode = argv[++index];
@@ -266,36 +285,77 @@ int main(int argc, char **argv) {
             frames = (int)value;
         } else if (!strcmp(argv[index], "--help")) {
             puts("Usage: doom-raylib [MAP01.drmap] [--inspect] [--overview] [--noclip] [--frames N] [--screenshot FILE.png]\n"
+                 "       doom-raylib INPUT.WAD [MAP01..MAP32] [options] (prepare maps and music automatically)\n"
+                 "       doom-raylib INPUT.WAD --prepare-all [--voxels|--no-voxels] (fill cache, no GPU)\n"
                  "       [--music FILE.mid] [--no-music] [--all-keys] [--validation] [--view X Y Z YAW PITCH]\n"
                  "       [--motion FILE.pfm] [--dlss|--no-dlss] [--nr-style 0|1|2] [--nr-passes 1..4] [--profile]\n"
-                 "       [--sr off|quality|balanced|performance] [--size WIDTH HEIGHT] [--fg] [--visible]\n"
+                 "       [--sr off|quality|balanced|performance] [--size WIDTH HEIGHT] [--fg] [--visible] [--fullscreen]\n"
                  "       [--no-fg] [--ray-lighting|--no-ray-lighting] [--no-vsync]\n"
-                 "Defaults: DLSS on when built in (style 1, two passes), FG off, ray lighting on. --dlss5 aliases --dlss.\n"
+                 "       [--rr|--no-rr (F10: DLSS Ray Reconstruction)] [--no-nr]\n"
+                 "       [--no-ngx (native rendering; do not initialize any NGX feature)]\n"
+                 "       [--voxels|--no-voxels (WAD: auto when source assets exist; drmap: off by default)]\n"
+                 "Defaults: DLSS5 NR+SR when built in (style 1, two passes), FG off, ray lighting on.\n"
+                 "--dlss5 selects NR+SR; --rr selects Ray Reconstruction. F10 switches between them.\n"
                  "WASD: walk | mouse: turn | E/Space: use | Shift: run | N: noclip | Tab: mouse | R: reset | Esc: quit\n"
                  "Space/Ctrl: up/down in noclip; return to walk resets the player start\n"
-                 "F5: DLSS NR+SR | F6: NR | F7: style | F8: 1/2/4 NR passes | F9: FG | L: ray lighting");
+                 "F5: DLSS | F6: NR | F7: style | F8: 1/2/4 NR passes | F9: FG | F10: RR | F12: fullscreen | L: ray lighting\n"
+                 "The scene renders at 640x480; the window is the output resolution.");
             return 0;
         } else if (argv[index][0] == '-') fail("Unknown option %s", argv[index]);
-        else path = argv[index];
+        else if (!have_path) { path = argv[index]; have_path = true; }
+        else if (!requested_map) requested_map = argv[index];
+        else fail("Unexpected argument %s", argv[index]);
     }
     if ((screenshot || motion_capture) && !frames) frames = 2;
+    if (no_ngx) {
+        dlss_available = fg_available = dlss_enabled = frame_generation = ray_reconstruction = false;
+        puts("NGX disabled for this process; native rendering and ray lighting remain available");
+    }
     if (dlss_enabled && !dlss_available) fail("DLSS requires a DOOM_DLSS5 build");
     if (frame_generation && !fg_available) fail("FG requires a DOOM_FRAME_GENERATION build");
+    if (ray_reconstruction && !dlss_available) fail("Ray reconstruction requires a DOOM_DLSS5 build");
 #if defined(_WIN32) && defined(DOOM_DLSS5)
-    if (dlss_available && !inspect) {
+    if (dlss_available && !inspect && !prepare_all) {
         int status;
         if (neural_relaunch(&status)) return status;
     }
 #endif
     char *current_path = NULL;
-    bool neural_active = dlss_enabled;
+    LevelSource source = {0};
+    if (level_is_wad(path)) {
+        source = level_source_create(path, voxel_mode);
+        if (prepare_all) {
+            for (unsigned number = 1; number <= 32; ++number) {
+                char map[6];
+                snprintf(map, sizeof(map), "MAP%02u", number);
+                char *prepared = level_source_prepare(&source, map);
+                free(prepared);
+            }
+            puts("Prepared MAP01..MAP32 in the cache");
+            level_source_free(&source);
+            return 0;
+        }
+        current_path = level_source_prepare(&source, requested_map ? requested_map : "MAP01");
+        path = current_path;
+        voxels = source.voxel_root != NULL;
+    } else {
+        if (prepare_all) fail("--prepare-all requires WAD input");
+        if (requested_map) fail("A map name is only valid with WAD input");
+        voxels = voxel_mode == VOXELS_ON;
+    }
+    bool neural_active = dlss_enabled && !no_neural;
     bool ray_active = ray_lighting;
     glfwSetErrorCallback(window_error);
     if (!inspect && !glfwInit()) fail("Cannot initialize GLFW");
 load_scene:
     Scene scene = scene_read(path);
+    if (voxels) {
+        char *voxel_path = scene_sidecar(path, ".drvox");
+        scene_read_voxels(&scene, voxel_path);
+        free(voxel_path);
+    }
     scene_print(&scene);
-    if (inspect) { scene_free(&scene); return 0; }
+    if (inspect) { scene_free(&scene); free(current_path); level_source_free(&source); return 0; }
     Player player = player_spawn(&scene);
     if (all_keys) player.keys = 7;
     Specials specials = specials_create(&scene);
@@ -304,8 +364,12 @@ load_scene:
     glfwWindowHint(GLFW_VISIBLE, frames && !visible ? GLFW_FALSE : GLFW_TRUE);
     char title[128];
     snprintf(title, sizeof(title), "Doom %s - C23 / Vulkan", scene.map);
-    GLFWwindow *window = glfwCreateWindow(window_size[0], window_size[1], title, NULL, NULL);
+    GLFWmonitor *monitor = fullscreen ? glfwGetPrimaryMonitor() : NULL;
+    const GLFWvidmode *video_mode = monitor ? glfwGetVideoMode(monitor) : NULL;
+    GLFWwindow *window = glfwCreateWindow(video_mode ? video_mode->width : window_size[0],
+        video_mode ? video_mode->height : window_size[1], title, monitor, NULL);
     if (!window) fail("Cannot create Vulkan window");
+    int window_position[2] = {100, 100};
     Input input = {0};
     glfwSetWindowUserPointer(window, &input);
     glfwSetKeyCallback(window, key_event);
@@ -314,13 +378,14 @@ load_scene:
     glfwSetWindowFocusCallback(window, focus_event);
     Renderer *renderer = renderer_create(window, &scene, (RendererOptions){.validation = validation,
         .dlss_enabled = dlss_available, .upscale_mode = dlss_enabled ? upscale_mode : 0,
-        .frame_generation = fg_available, .ray_lighting = true, .no_vsync = no_vsync});
+        .frame_generation = fg_available, .ray_lighting = true, .ray_reconstruction = dlss_available, .no_vsync = no_vsync});
     if (profile) renderer_enable_profile(renderer);
     if (dlss_available) renderer_set_neural_style(renderer, neural_style);
     if (dlss_available) renderer_set_neural_passes(renderer, neural_passes);
     if (dlss_available && !neural_active) renderer_set_neural(renderer, false);
     if (fg_available && !frame_generation) renderer_set_frame_generation(renderer, false);
     if (!ray_active) renderer_set_ray_lighting(renderer, false);
+    renderer_set_ray_reconstruction(renderer, ray_reconstruction && dlss_enabled && ray_active);
     RenderCamera camera = start_camera(&scene, overview);
     Position initial_direction = position_add(camera.target, position_scale(camera.position, -1));
     float yaw = atan2f(-initial_direction.z, initial_direction.x);
@@ -357,6 +422,22 @@ load_scene:
         music_update();
         bool reset_history = frame == 0;
         if (!frames) {
+            if (input.pressed[GLFW_KEY_F12]) {
+                if (frame_generation) renderer_set_frame_generation(renderer, false);
+                fullscreen = glfwGetWindowMonitor(window) == NULL;
+                if (fullscreen) {
+                    glfwGetWindowPos(window, &window_position[0], &window_position[1]);
+                    glfwGetWindowSize(window, &window_size[0], &window_size[1]);
+                    monitor = glfwGetPrimaryMonitor();
+                    video_mode = glfwGetVideoMode(monitor);
+                    glfwSetWindowMonitor(window, monitor, 0, 0, video_mode->width, video_mode->height, video_mode->refreshRate);
+                } else {
+                    glfwSetWindowMonitor(window, NULL, window_position[0], window_position[1],
+                        window_size[0], window_size[1], GLFW_DONT_CARE);
+                }
+                if (frame_generation) renderer_set_frame_generation(renderer, true);
+                reset_history = true;
+            }
             if (input.pressed[GLFW_KEY_L] && renderer_set_ray_lighting(renderer, !ray_active))
                 ray_active = !ray_active;
             if (dlss_available && input.pressed[GLFW_KEY_F5]) {
@@ -368,6 +449,8 @@ load_scene:
             }
             if (fg_available && input.pressed[GLFW_KEY_F9] &&
                 renderer_set_frame_generation(renderer, !frame_generation)) frame_generation = !frame_generation;
+            if (dlss_available && input.pressed[GLFW_KEY_F10]) ray_reconstruction = !ray_reconstruction;
+            renderer_set_ray_reconstruction(renderer, ray_reconstruction && dlss_enabled && ray_active);
             if (dlss_enabled && input.pressed[GLFW_KEY_F6] && renderer_set_neural(renderer, !neural_active)) {
                 neural_active = !neural_active;
                 reset_history = true;
@@ -402,17 +485,18 @@ load_scene:
         if (!overview) camera.fovy = 2 * atanf((float)height / (float)width) / radians;
         if (specials.exited && !exit_checked) {
             next_map = specials_next_map(&scene, &specials, path);
-            next_exists = next_map && file_exists(next_map);
+            next_exists = next_map && (source.wad || file_exists(next_map));
             exit_checked = true;
         }
         if (!frames) {
-            renderer_text(renderer, noclip ? "NOCLIP | WASD + mouse | Space/Ctrl | N: walk | Shift | Tab | R | Esc" :
-                          "WALK | WASD + mouse | E/Space: use | N: noclip | Shift | Tab | R | Esc", 12, 8);
+            renderer_text(renderer, noclip ? "NOCLIP | WASD + mouse | Space/Ctrl | N: walk | Shift | Tab | R | F12 | Esc" :
+                          "WALK | WASD + mouse | E/Space: use | N: noclip | Shift | Tab | R | F12 | Esc", 12, 8);
             char status[384];
-            char mode[160];
-            snprintf(mode, sizeof(mode), "%s S%u x%u | F5:DLSS F6:NR F7:style F8:passes | FG %s [F9]",
-                                       neural_active ? "DLSS5 NR" : dlss_enabled && upscale_mode ? "SR only" : "Native", neural_style, neural_passes,
-                                       frame_generation ? "2x" : "off");
+            char mode[192];
+            bool rr_active = ray_reconstruction && dlss_enabled && ray_active;
+            snprintf(mode, sizeof(mode), "%s | NR S%u x%u%s | F5:DLSS F6:NR F7:style F8:passes | FG %s [F9] | F10:mode",
+                                       rr_active ? "DLSS RR" : neural_active ? "DLSS5 NR" : dlss_enabled && upscale_mode ? "SR only" : "Native", neural_style, neural_passes,
+                                       rr_active ? " paused" : neural_active ? " on" : " off", frame_generation ? "2x" : "off");
             snprintf(status, sizeof(status), "Health %u | Secrets %u/%u | Keys %s %s %s | %.0f render FPS | %s%s",
                      player.health, specials.secrets, specials.total_secrets,
                      player.keys & 1 ? "BLUE" : "-", player.keys & 2 ? "YELLOW" : "-",
@@ -443,10 +527,19 @@ load_scene:
     glfwDestroyWindow(window);
     scene_free(&scene);
     if (advance) {
+        if (source.wad) {
+            char map[6];
+            const char *name = strrchr(next_map, '/'), *backslash = strrchr(next_map, '\\');
+            if (backslash && (!name || backslash > name)) name = backslash;
+            memcpy(map, name ? name + 1 : next_map, 5); map[5] = 0;
+            free(next_map);
+            next_map = level_source_prepare(&source, map);
+        }
         free(current_path); current_path = next_map; path = current_path; music_path = NULL;
         goto load_scene;
     }
     free(next_map); free(current_path);
+    level_source_free(&source);
     glfwTerminate();
     return 0;
 }

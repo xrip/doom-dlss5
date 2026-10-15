@@ -1,6 +1,85 @@
 # YAGNI, KISS, and DRY review
 
-## Current Vulkan and sprite checkpoint
+## Optional voxel checkpoint
+
+Reviewed the voxel converter, native sidecar, renderer ranges, shadow
+materials, animation state, tools, tests, and docs, including the existing
+sprite and ray paths they extend. The earlier pending lighting/RR review
+below remains part of this checkpoint.
+
+- Kept `DRMAP006` unchanged. Prepared-file input needs an explicit voxel
+  option; WAD input can detect the local voxel sources. KVX and definition
+  parsing stay out of the game.
+- Reused the existing palette, animation tick, object vertex buffer, ray
+  queries, motion vectors, and material outputs. No actor framework,
+  backend layer, or asset-management framework was added.
+- Removed duplicate per-vertex instance history. Object motion uses current
+  and previous matrices; shared local pose vertices stay immutable.
+- Palette validation and 6-bit RGB expansion run once per source color,
+  not once for every candidate WAD palette entry.
+- Model rays use an opaque flag, without sampling the sprite cutout.
+  TLAS instance IDs identify objects; no primitive/2 assumption or extra
+  per-vertex object word remains. Models retain self-shadows and emitter exclusion.
+- Fixed mirrored facing in the raw voxel Y axis rather than adding model
+  exceptions or changing valid definition defaults. Tests cover the default,
+  explicit zero, all cardinal offsets, and outward triangle winding.
+- Kept only measured speed changes. Moving MAP13 exposed >100 ms spikes
+  hidden by the static test, so shared pose meshes and GPU instance matrices
+  replace CPU vertex rewrites. Static pose BLASes are built once; only the
+  small TLAS and moving world geometry update. The earlier CPU dirty-range
+  cache and an opaque pipeline trial are removed, not layered underneath.
+- WAD startup calls the existing separate converter; it adds no WAD parser
+  to the viewer. A local fingerprint directory and completion marker give
+  cache reuse and recovery without a database or cache service.
+- Kept bounded native/KVX input checks and whole-animation sprite fallback.
+  Unsupported actor pitch/roll/momentum flags add no stored runtime state.
+
+Native-only checks are used while the NGX updater issue is unresolved.
+The same full-featured `build/` executable supports `--no-ngx`; no separate
+native build tree is required. CMake's generated scene fixtures also live
+under `build/cache/`.
+No driver settings, asset packs, or source voxel definitions are changed.
+
+Final safe checks: the Clang build and all 22 selected CPU/native-Vulkan
+tests pass. All 32 voxel cache entries prepare, load, and give cache hits
+on a second prewarm; all 32 also render with ray lighting and synchronization
+validation through the same `build/` binary with `--no-ngx`.
+A generated two-map WAD passes real exit/use/Enter
+transition, F12, maximize/minimize/restore, and close with `--no-ngx`.
+NGX GPU checks have an explicit `ngx` label and remain excluded with
+`ctest -LE ngx` because of the unresolved updater issue.
+
+## Ray lighting and reconstruction checkpoint
+
+Reviewed the changes since `eaf5c12` and the existing renderer paths they
+extend: natural lights, sprite shadows, RR, NR/SR/FG inputs, sprite plane
+occlusion, fullscreen controls, tests, build setup, tools, and docs.
+
+- Removed the separate render-size query: the scene always uses 640x480.
+- Shared quality-hint mapping and palette color conversion instead of
+  adding separate versions for each DLSS path.
+- Light ranking reads power from the light itself, with no duplicate
+  power argument or output value. Sector geometry uses its area directly,
+  without a second validity flag or setup pass.
+- RR and NR+SR remain separate paths. RR does not add a second upscale
+  pass or run the experimental NR model on its output. Its initialization
+  check no longer depends on SR's separate parameters.
+- Sector geometry and sprite emitter colors are built once. Current sector
+  brightness, ceiling height, sprite frame, and visibility stay live.
+- The sprite depth fix uses the existing quads and only adds draw passes
+  when a sprite crosses its sector floor or ceiling. Tests cover animation
+  frame sizes, opaque and transparent walls, and switching between paths.
+- Limited wall-only depth to overflowing sprites. Other sprites keep plane
+  occlusion even when an overflowing sprite is elsewhere in the scene.
+  The depth passes share one attachment barrier helper.
+- Kept SDK-required buffers, image barriers, and the separate FG UI layer.
+  These have present callers and validation tests, not future-only uses.
+
+Defaults remain NR+SR, style 1, two passes, RT on, FG off. RR is selected
+with F10 or `--rr`; F12 changes fullscreen without a new window framework.
+No WAD, SDK binaries, generated files, or local voxel assets are included.
+
+## Historical Vulkan and sprite checkpoint
 
 Reviewed the pending Vulkan/NGX renderer, presentation worker, shaders,
 CMake setup, live controls, HUD, sprite conversion/playback, tests, tools,

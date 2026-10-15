@@ -26,8 +26,10 @@
 #include <vector>
 
 #include <nvsdk_ngx_defs.h>
+#include <nvsdk_ngx_defs_dlssd.h>
 #include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_vk.h>
+#include <nvsdk_ngx_helpers_dlssd_vk.h>
 #include <nvsdk_ngx_vk.h>
 
 namespace {
@@ -37,6 +39,7 @@ constexpr char kEngineVersion[] = "0.1";
 constexpr unsigned long long kCommunitySnippetCompatibilityId = 0x1122334455667788ULL;
 constexpr wchar_t kNRRuntimeName[] = L"nvngx_dlssnr.dll";
 constexpr wchar_t kSRRuntimeName[] = L"nvngx_dlss.dll";
+constexpr wchar_t kRRRuntimeName[] = L"nvngx_dlssd.dll";
 
 struct TrackedImage {
     VkImage image;
@@ -327,21 +330,27 @@ bool query_extensions(
     std::vector<VkExtensionProperties> combined_extensions;
     auto append_feature_extensions = [&](const wchar_t *runtime_name,
                                          NVSDK_NGX_Feature feature,
-                                         const char *operation) {
+                                         const char *operation,
+                                         char *feature_error,
+                                         size_t feature_error_capacity) {
+        clear_error(feature_error, feature_error_capacity);
         ScopedModule runtime;
-        if (!load_runtime(runtime_name, &runtime.handle, error, error_capacity)) return false;
+        if (!load_runtime(runtime_name, &runtime.handle, feature_error,
+                          feature_error_capacity)) return false;
 
         PfnGetInstanceExtensions get_instance_extensions = nullptr;
         PfnGetDeviceExtensions get_device_extensions = nullptr;
         if (device_query) {
             if (!resolve_export(runtime.handle,
                                 "NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements",
-                                &get_device_extensions, error, error_capacity))
+                                &get_device_extensions, feature_error,
+                                feature_error_capacity))
                 return false;
         } else if (!resolve_export(
                        runtime.handle,
                        "NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements",
-                       &get_instance_extensions, error, error_capacity)) {
+                       &get_instance_extensions, feature_error,
+                       feature_error_capacity)) {
             return false;
         }
 
@@ -354,9 +363,11 @@ bool query_extensions(
             get_device_extensions(instance, physical_device, &discovery_info,
                                   &required_count, &required) :
             get_instance_extensions(&discovery_info, &required_count, &required);
-        if (ngx_failed(result)) return ngx_fail(error, error_capacity, operation, result);
+        if (ngx_failed(result))
+            return ngx_fail(feature_error, feature_error_capacity, operation, result);
         if (required_count && !required)
-            return fail(error, error_capacity, "NGX returned a null extension list");
+            return fail(feature_error, feature_error_capacity,
+                        "NGX returned a null extension list");
 
         for (uint32_t index = 0; index < required_count; ++index) {
             auto existing = std::find_if(
@@ -375,10 +386,22 @@ bool query_extensions(
     };
 
     if (!append_feature_extensions(kNRRuntimeName, NVSDK_NGX_Feature_Reserved18,
-                                   "DLSSNR Vulkan extension query") ||
+                                   "DLSSNR Vulkan extension query", error,
+                                   error_capacity) ||
         !append_feature_extensions(kSRRuntimeName, NVSDK_NGX_Feature_SuperSampling,
-                                   "DLSS Vulkan extension query"))
+                                   "DLSS Vulkan extension query", error,
+                                   error_capacity))
         return false;
+
+    std::wstring rr_runtime_path;
+    if (!runtime_path(kRRRuntimeName, &rr_runtime_path, error, error_capacity))
+        return false;
+    if (GetFileAttributesW(rr_runtime_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        char rr_error[256]{};
+        append_feature_extensions(kRRRuntimeName, NVSDK_NGX_Feature_RayReconstruction,
+                                  "DLSS RR Vulkan extension query", rr_error,
+                                  sizeof(rr_error));
+    }
 
     if (combined_extensions.size() > UINT32_MAX)
         return fail(error, error_capacity, "NGX extension list exceeds uint32 capacity");
@@ -431,8 +454,10 @@ struct DoomDlss5 {
     VkDevice device = VK_NULL_HANDLE;
     NVSDK_NGX_Parameter *parameters = nullptr;
     NVSDK_NGX_Parameter *sr_parameters = nullptr;
+    NVSDK_NGX_Parameter *rr_parameters = nullptr;
     NVSDK_NGX_Handle *features[4]{};
     NVSDK_NGX_Handle *sr_feature = nullptr;
+    NVSDK_NGX_Handle *rr_feature = nullptr;
     unsigned pass_count = 0;
     HMODULE runtime = nullptr;
     PfnCreateFeature1 create_feature = nullptr;
@@ -442,11 +467,15 @@ struct DoomDlss5 {
     VkExtent2D output_size{};
     VkExtent2D sr_output_size{};
     VkExtent2D sr_work_size{};
+    VkExtent2D rr_output_size{};
+    VkExtent2D rr_work_size{};
     DoomDlss5SRMode sr_mode = DOOM_DLSS5_SR_OFF;
+    DoomDlss5SRMode rr_mode = DOOM_DLSS5_SR_OFF;
     std::wstring application_data_path;
     bool core_initialized = false;
     bool snippet_initialized = false;
     bool sr_reset_pending = true;
+    bool rr_reset_pending = true;
     bool reset_pending[4]{};
 };
 
@@ -466,6 +495,23 @@ bool release_sr_feature(DoomDlss5 *dlss5, char *error, size_t error_capacity) {
     dlss5->sr_output_size = {};
     dlss5->sr_work_size = {};
     dlss5->sr_reset_pending = true;
+    return success;
+}
+
+bool release_rr_feature(DoomDlss5 *dlss5, char *error, size_t error_capacity) {
+    bool success = true;
+    if (dlss5->rr_feature) {
+        const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_ReleaseFeature(dlss5->rr_feature);
+        dlss5->rr_feature = nullptr;
+        if (ngx_failed(result)) {
+            ngx_fail(error, error_capacity, "DLSS RR feature release", result);
+            success = false;
+        }
+    }
+    dlss5->rr_output_size = {};
+    dlss5->rr_work_size = {};
+    dlss5->rr_mode = DOOM_DLSS5_SR_OFF;
+    dlss5->rr_reset_pending = true;
     return success;
 }
 
@@ -502,12 +548,18 @@ bool shutdown(DoomDlss5 *dlss5, char *error, size_t error_capacity) {
         }
     };
 
+    if (!release_rr_feature(dlss5, error, error_capacity)) success = false;
     if (!release_sr_feature(dlss5, error, error_capacity)) success = false;
     if (!release_feature(dlss5, error, error_capacity)) success = false;
     if (dlss5->sr_parameters) {
         const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_DestroyParameters(dlss5->sr_parameters);
         dlss5->sr_parameters = nullptr;
         if (ngx_failed(result)) remember_ngx("DLSS SR parameter destroy", result);
+    }
+    if (dlss5->rr_parameters) {
+        const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_DestroyParameters(dlss5->rr_parameters);
+        dlss5->rr_parameters = nullptr;
+        if (ngx_failed(result)) remember_ngx("DLSS RR parameter destroy", result);
     }
     if (dlss5->parameters) {
         const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_DestroyParameters(dlss5->parameters);
@@ -538,8 +590,12 @@ bool shutdown(DoomDlss5 *dlss5, char *error, size_t error_capacity) {
     dlss5->output_size = {};
     dlss5->sr_output_size = {};
     dlss5->sr_work_size = {};
+    dlss5->rr_output_size = {};
+    dlss5->rr_work_size = {};
     dlss5->sr_mode = DOOM_DLSS5_SR_OFF;
+    dlss5->rr_mode = DOOM_DLSS5_SR_OFF;
     dlss5->sr_reset_pending = true;
+    dlss5->rr_reset_pending = true;
     dlss5->application_data_path.clear();
     return success;
 }
@@ -549,8 +605,9 @@ bool valid_sr_mode(DoomDlss5SRMode mode) {
            mode == DOOM_DLSS5_SR_BALANCED || mode == DOOM_DLSS5_SR_PERFORMANCE;
 }
 
-NVSDK_NGX_PerfQuality_Value sr_quality_value(DoomDlss5SRMode mode) {
+NVSDK_NGX_PerfQuality_Value dlss_quality_value(DoomDlss5SRMode mode) {
     switch (mode) {
+        case DOOM_DLSS5_SR_OFF: return NVSDK_NGX_PerfQuality_Value_DLAA;
         case DOOM_DLSS5_SR_QUALITY: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
         case DOOM_DLSS5_SR_BALANCED: return NVSDK_NGX_PerfQuality_Value_Balanced;
         case DOOM_DLSS5_SR_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_MaxPerf;
@@ -713,45 +770,6 @@ bool doom_dlss5_create(
     return true;
 }
 
-bool doom_dlss5_render_size(
-    DoomDlss5 *dlss5,
-    DoomDlss5SRMode mode,
-    VkExtent2D output_extent,
-    VkExtent2D *work_extent,
-    char *error,
-    size_t error_capacity) {
-    clear_error(error, error_capacity);
-    if (!dlss5 || !dlss5->core_initialized || !dlss5->sr_parameters)
-        return fail(error, error_capacity, "NGX runtime is not initialized");
-    if (!work_extent) return fail(error, error_capacity, "work_extent is null");
-    if (!output_extent.width || !output_extent.height)
-        return fail(error, error_capacity, "output dimensions must be nonzero");
-    if (!valid_sr_mode(mode)) return fail(error, error_capacity, "invalid DLSS SR mode");
-    if (mode == DOOM_DLSS5_SR_OFF) {
-        *work_extent = output_extent;
-        return true;
-    }
-
-    unsigned int optimal_width = 0;
-    unsigned int optimal_height = 0;
-    unsigned int maximum_width = 0;
-    unsigned int maximum_height = 0;
-    unsigned int minimum_width = 0;
-    unsigned int minimum_height = 0;
-    float sharpness = 0.0f;
-    const NVSDK_NGX_Result result = NGX_DLSS_GET_OPTIMAL_SETTINGS(
-        dlss5->sr_parameters, output_extent.width, output_extent.height,
-        sr_quality_value(mode), &optimal_width, &optimal_height,
-        &maximum_width, &maximum_height, &minimum_width, &minimum_height, &sharpness);
-    if (ngx_failed(result))
-        return ngx_fail(error, error_capacity, "DLSS SR optimal render size query", result);
-    if (!optimal_width || !optimal_height)
-        return fail(error, error_capacity, "DLSS SR returned zero optimal dimensions");
-
-    work_extent->width = optimal_width;
-    work_extent->height = optimal_height;
-    return true;
-}
 
 bool doom_dlss5_upscale(
     DoomDlss5 *dlss5,
@@ -776,11 +794,8 @@ bool doom_dlss5_upscale(
     if (!std::isfinite(jitter_x_pixels) || !std::isfinite(jitter_y_pixels))
         return fail(error, error_capacity, "jitter offsets must be finite");
 
-    VkExtent2D work_extent{};
+    const VkExtent2D work_extent{frame->color.width, frame->color.height};
     const VkExtent2D output_extent{frame->output.width, frame->output.height};
-    if (!doom_dlss5_render_size(dlss5, mode, output_extent, &work_extent,
-                                error, error_capacity))
-        return false;
     if (!validate_image(frame->color, VK_FORMAT_R8G8B8A8_UNORM, "color", error, error_capacity) ||
         !validate_image(frame->motion, VK_FORMAT_R16G16_SFLOAT, "motion", error, error_capacity) ||
         !validate_image(frame->depth, VK_FORMAT_D32_SFLOAT, "depth", error, error_capacity) ||
@@ -789,7 +804,9 @@ bool doom_dlss5_upscale(
     if (frame->color.width != work_extent.width || frame->color.height != work_extent.height ||
         frame->motion.width != work_extent.width || frame->motion.height != work_extent.height ||
         frame->depth.width != work_extent.width || frame->depth.height != work_extent.height)
-        return fail(error, error_capacity, "color, motion, and depth dimensions must match the optimal render size");
+        return fail(error, error_capacity, "color, motion, and depth dimensions must match the render size");
+    if (work_extent.width > output_extent.width || work_extent.height > output_extent.height)
+        return fail(error, error_capacity, "DLSS SR output must not be smaller than its input");
 
     if (dlss5->sr_feature &&
         (dlss5->sr_mode != mode ||
@@ -806,7 +823,8 @@ bool doom_dlss5_upscale(
         create_params.Feature.InHeight = work_extent.height;
         create_params.Feature.InTargetWidth = output_extent.width;
         create_params.Feature.InTargetHeight = output_extent.height;
-        create_params.Feature.InPerfQualityValue = sr_quality_value(mode);
+        create_params.Feature.InPerfQualityValue = work_extent.width == output_extent.width && work_extent.height == output_extent.height ?
+            NVSDK_NGX_PerfQuality_Value_DLAA : dlss_quality_value(mode);
         create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
                                              NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
         const NVSDK_NGX_Result create_result = NGX_VULKAN_CREATE_DLSS_EXT1(
@@ -859,6 +877,189 @@ bool doom_dlss5_upscale(
         return ngx_fail(error, error_capacity, "DLSS SR EvaluateFeature", evaluate_result);
     }
     dlss5->sr_reset_pending = false;
+    return true;
+}
+
+bool doom_dlss5_reconstruct(
+    DoomDlss5 *dlss5,
+    VkCommandBuffer command_buffer,
+    const DoomDlss5ReconstructionFrame *frame,
+    char *error,
+    size_t error_capacity) {
+    clear_error(error, error_capacity);
+    if (!dlss5 || !dlss5->core_initialized)
+        return fail(error, error_capacity, "NGX runtime is not initialized");
+    if (command_buffer == VK_NULL_HANDLE)
+        return fail(error, error_capacity, "command_buffer is null");
+    if (!frame) return fail(error, error_capacity, "frame is null");
+    if (!valid_sr_mode(frame->mode))
+        return fail(error, error_capacity, "invalid DLSS RR performance mode");
+    if (!std::isfinite(frame->jitter_x_pixels) || !std::isfinite(frame->jitter_y_pixels))
+        return fail(error, error_capacity, "jitter offsets must be finite");
+
+    const VkExtent2D output_extent{frame->output.width, frame->output.height};
+    const VkExtent2D work_extent{frame->color.width, frame->color.height};
+    if (!validate_image(frame->color, VK_FORMAT_R16G16B16A16_SFLOAT,
+                        "RR color", error, error_capacity) ||
+        !validate_image(frame->motion, VK_FORMAT_R16G16_SFLOAT,
+                        "RR motion", error, error_capacity) ||
+        !validate_image(frame->depth, VK_FORMAT_R32_SFLOAT,
+                        "RR linear depth", error, error_capacity) ||
+        !validate_image(frame->diffuse_albedo, VK_FORMAT_R16G16B16A16_SFLOAT,
+                        "RR diffuse albedo", error, error_capacity) ||
+        !validate_image(frame->specular_albedo, VK_FORMAT_R16G16B16A16_SFLOAT,
+                        "RR specular albedo", error, error_capacity) ||
+        !validate_image(frame->normals_roughness, VK_FORMAT_R16G16B16A16_SFLOAT,
+                        "RR normals and roughness", error, error_capacity) ||
+        !validate_image(frame->output, VK_FORMAT_R16G16B16A16_SFLOAT,
+                        "RR output", error, error_capacity))
+        return false;
+
+    const DoomDlss5Image *input_images[] = {
+        &frame->color,
+        &frame->motion,
+        &frame->depth,
+        &frame->diffuse_albedo,
+        &frame->specular_albedo,
+        &frame->normals_roughness
+    };
+    for (const DoomDlss5Image *image : input_images) {
+        if (image->width != work_extent.width || image->height != work_extent.height)
+            return fail(error, error_capacity, "RR input images must match the selected render size");
+    }
+    if (frame->mode == DOOM_DLSS5_SR_OFF &&
+        (work_extent.width != output_extent.width || work_extent.height != output_extent.height))
+        return fail(error, error_capacity, "DLAA requires matching input and output dimensions");
+    if (work_extent.width > output_extent.width || work_extent.height > output_extent.height)
+        return fail(error, error_capacity, "DLSS RR output must not be smaller than its input");
+
+    if (dlss5->rr_feature &&
+        (dlss5->rr_mode != frame->mode ||
+         dlss5->rr_output_size.width != output_extent.width ||
+         dlss5->rr_output_size.height != output_extent.height ||
+         dlss5->rr_work_size.width != work_extent.width ||
+         dlss5->rr_work_size.height != work_extent.height)) {
+        if (!release_rr_feature(dlss5, error, error_capacity)) return false;
+    }
+
+    if (!dlss5->rr_feature) {
+        std::wstring rr_runtime_path;
+        if (!runtime_path(kRRRuntimeName, &rr_runtime_path, error, error_capacity))
+            return false;
+        if (GetFileAttributesW(rr_runtime_path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return fail(error, error_capacity,
+                        "nvngx_dlssd.dll must be beside the executable to use DLSS RR");
+
+        if (!dlss5->rr_parameters) {
+            const NVSDK_NGX_Result params_result =
+                NVSDK_NGX_VULKAN_GetCapabilityParameters(&dlss5->rr_parameters);
+            if (ngx_failed(params_result) || !dlss5->rr_parameters) {
+                if (ngx_failed(params_result))
+                    return ngx_fail(error, error_capacity,
+                                    "DLSS RR capability parameter query", params_result);
+                return fail(error, error_capacity,
+                            "NGX returned null DLSS RR capability parameters");
+            }
+        }
+
+        unsigned int available = 0;
+        const NVSDK_NGX_Result availability_result = NVSDK_NGX_Parameter_GetUI(
+            dlss5->rr_parameters, NVSDK_NGX_Parameter_SuperSamplingDenoising_Available,
+            &available);
+        if (ngx_failed(availability_result))
+            return ngx_fail(error, error_capacity, "DLSS RR capability query",
+                            availability_result);
+        if (!available) {
+            unsigned int needs_updated_driver = 0;
+            const NVSDK_NGX_Result driver_result = NVSDK_NGX_Parameter_GetUI(
+                dlss5->rr_parameters,
+                NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver,
+                &needs_updated_driver);
+            if (!ngx_failed(driver_result) && needs_updated_driver)
+                return fail(error, error_capacity,
+                            "DLSS RR requires a newer NVIDIA driver");
+            return fail(error, error_capacity,
+                        "DLSS RR is unavailable on this GPU or driver");
+        }
+
+        NVSDK_NGX_DLSSD_Create_Params create_params{};
+        create_params.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+        create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
+        create_params.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_Linear;
+        create_params.InWidth = work_extent.width;
+        create_params.InHeight = work_extent.height;
+        create_params.InTargetWidth = output_extent.width;
+        create_params.InTargetHeight = output_extent.height;
+        create_params.InPerfQualityValue = dlss_quality_value(frame->mode);
+        create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+                                             NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
+                                             NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+        const NVSDK_NGX_Result create_result = NGX_VULKAN_CREATE_DLSSD_EXT1(
+            dlss5->device, command_buffer, 1, 1, &dlss5->rr_feature,
+            dlss5->rr_parameters, &create_params);
+        if (ngx_failed(create_result)) {
+            dlss5->rr_feature = nullptr;
+            return ngx_fail(error, error_capacity, "DLSS RR CreateFeature", create_result);
+        }
+        if (!dlss5->rr_feature)
+            return fail(error, error_capacity, "NGX returned a null DLSS RR feature handle");
+        dlss5->rr_mode = frame->mode;
+        dlss5->rr_output_size = output_extent;
+        dlss5->rr_work_size = work_extent;
+        dlss5->rr_reset_pending = true;
+    }
+
+    const VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    NVSDK_NGX_Resource_VK color_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->color.view, frame->color.image, color_range, frame->color.format,
+        frame->color.width, frame->color.height, false);
+    NVSDK_NGX_Resource_VK motion_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->motion.view, frame->motion.image, color_range, frame->motion.format,
+        frame->motion.width, frame->motion.height, false);
+    NVSDK_NGX_Resource_VK depth_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->depth.view, frame->depth.image, color_range, frame->depth.format,
+        frame->depth.width, frame->depth.height, false);
+    NVSDK_NGX_Resource_VK diffuse_albedo_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->diffuse_albedo.view, frame->diffuse_albedo.image, color_range,
+        frame->diffuse_albedo.format, frame->diffuse_albedo.width,
+        frame->diffuse_albedo.height, false);
+    NVSDK_NGX_Resource_VK specular_albedo_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->specular_albedo.view, frame->specular_albedo.image, color_range,
+        frame->specular_albedo.format, frame->specular_albedo.width,
+        frame->specular_albedo.height, false);
+    NVSDK_NGX_Resource_VK normals_roughness_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->normals_roughness.view, frame->normals_roughness.image, color_range,
+        frame->normals_roughness.format, frame->normals_roughness.width,
+        frame->normals_roughness.height, false);
+    NVSDK_NGX_Resource_VK output_resource = NVSDK_NGX_Create_ImageView_Resource_VK(
+        frame->output.view, frame->output.image, color_range, frame->output.format,
+        frame->output.width, frame->output.height, true);
+
+    NVSDK_NGX_VK_DLSSD_Eval_Params eval_params{};
+    eval_params.pInDiffuseAlbedo = &diffuse_albedo_resource;
+    eval_params.pInSpecularAlbedo = &specular_albedo_resource;
+    eval_params.pInNormals = &normals_roughness_resource;
+    eval_params.pInColor = &color_resource;
+    eval_params.pInOutput = &output_resource;
+    eval_params.pInDepth = &depth_resource;
+    eval_params.pInMotionVectors = &motion_resource;
+    eval_params.InJitterOffsetX = frame->jitter_x_pixels;
+    eval_params.InJitterOffsetY = frame->jitter_y_pixels;
+    eval_params.InRenderSubrectDimensions = {work_extent.width, work_extent.height};
+    eval_params.InReset = (frame->reset_history || dlss5->rr_reset_pending) ? 1 : 0;
+    eval_params.InMVScaleX = -static_cast<float>(work_extent.width);
+    eval_params.InMVScaleY = -static_cast<float>(work_extent.height);
+    eval_params.InPreExposure = 1.0f;
+    eval_params.InExposureScale = 1.0f;
+    eval_params.InToneMapperType = NVSDK_NGX_TONEMAPPER_STRING;
+
+    const NVSDK_NGX_Result evaluate_result = NGX_VULKAN_EVALUATE_DLSSD_EXT(
+        command_buffer, dlss5->rr_feature, dlss5->rr_parameters, &eval_params);
+    if (ngx_failed(evaluate_result)) {
+        dlss5->rr_reset_pending = true;
+        return ngx_fail(error, error_capacity, "DLSS RR EvaluateFeature", evaluate_result);
+    }
+    dlss5->rr_reset_pending = false;
     return true;
 }
 

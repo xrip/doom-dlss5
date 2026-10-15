@@ -5,6 +5,12 @@
 
 typedef struct { float x, y, z; } Position;
 typedef struct { float x, y, z, u, v; } SceneVertex;
+
+typedef struct {
+    size_t count;
+    SceneVertex *vertices;
+    float spin;
+} VoxelMesh;
 enum { SURFACE_WALL, SURFACE_FLOOR, SURFACE_CEILING, SURFACE_SWITCH };
 enum { WALL_MIDDLE, WALL_UPPER, WALL_LOWER };
 typedef struct {
@@ -12,6 +18,7 @@ typedef struct {
     uint32_t width, height;
     int32_t left, top;
     uint8_t *pixels;
+    VoxelMesh voxel;
 } Asset;
 typedef struct {
     uint32_t asset, shade, sky;
@@ -29,6 +36,7 @@ enum { MAX_SPRITE_FRAMES = 8 };
 typedef struct {
     uint32_t asset, sector;
     Position position;
+    float yaw;
     bool ceiling, fullbright, hidden;
     uint32_t frame_count, frame_index, frame_ticks;
     SpriteFrame frames[MAX_SPRITE_FRAMES];
@@ -70,6 +78,7 @@ typedef struct {
     WallSurface *walls;
     size_t teleport_count;
     Teleport *teleports;
+    uint32_t voxel_asset;
 } Scene;
 
 _Noreturn void fail(const char *format, ...);
@@ -83,6 +92,9 @@ int16_t read_i16(const uint8_t *data);
 void require_range(size_t size, size_t offset, size_t length);
 void scene_write(const Scene *scene, const char *path);
 Scene scene_read(const char *path);
+void scene_write_voxels(const Scene *scene, const char *path);
+void scene_read_voxels(Scene *scene, const char *path);
+const VoxelMesh *scene_sprite_voxel(const Scene *scene, const Sprite *sprite);
 void scene_free(Scene *scene);
 void scene_print(const Scene *scene);
 void scene_tick_sprites(Scene *scene);

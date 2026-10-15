@@ -1,4 +1,5 @@
 #include "scene.h"
+#include "voxel_convert.h"
 #include "tesselator.h"
 #include "mus.h"
 
@@ -661,6 +662,7 @@ static void make_things(Converter *converter) {
         }
         scene->sprites[scene->sprite_count++] = (Sprite){.asset = asset,
             .sector = sector_index, .position = position, .ceiling = (image->flags & 2) != 0,
+            .yaw = (float)read_u16(thing + 4) * 0.01745329252f,
             .fullbright = (image->flags & 1) != 0};
         make_sprite_animation(converter, &scene->sprites[scene->sprite_count - 1], image->patch);
     }
@@ -840,14 +842,33 @@ static void write_music(const Converter *converter, const char *path) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--self-test")) { self_test(); return 0; }
-    if (argc < 3 || argc > 4) {
-        puts("Usage: wad-convert INPUT.WAD OUTPUT.drmap [MAP01]\n       wad-convert --self-test");
+    if (argc < 3) {
+        puts("Usage: wad-convert INPUT.WAD OUTPUT.drmap [MAP01]\n"
+             "       [--voxels DIRECTORY --voxeldef FILE (repeat for each definition file)]\n"
+             "       wad-convert --self-test");
         return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 1;
     }
-    const char *map = argc == 4 ? argv[3] : "MAP01";
+    const char *map = "MAP01", *voxel_directory = NULL;
+    const char **definitions = allocate((size_t)argc, sizeof(*definitions));
+    size_t definition_count = 0;
+    for (int index = 3; index < argc; ++index) {
+        if (!strcmp(argv[index], "--voxels") && index + 1 < argc) voxel_directory = argv[++index];
+        else if (!strcmp(argv[index], "--voxeldef") && index + 1 < argc) definitions[definition_count++] = argv[++index];
+        else if (index == 3 && argv[index][0] != '-') map = argv[index];
+        else fail("Unknown or incomplete converter option %s", argv[index]);
+    }
+    if ((voxel_directory != NULL) != (definition_count != 0))
+        fail("Voxel conversion requires --voxels DIRECTORY and --voxeldef FILE");
     if (strlen(map) != 5 || strncmp(map, "MAP", 3) || map[3] < '0' || map[3] > '9' ||
         map[4] < '0' || map[4] > '9') fail("Expected a MAPxx name");
     Converter converter = convert_map(argv[1], map);
+    if (voxel_directory) {
+        convert_voxels(&converter.scene, voxel_directory, definitions, definition_count);
+        char *voxel_path = scene_sidecar(argv[2], ".drvox");
+        scene_write_voxels(&converter.scene, voxel_path);
+        free(voxel_path);
+    }
+    free(definitions);
     scene_print(&converter.scene);
     scene_write(&converter.scene, argv[2]);
     Scene check = scene_read(argv[2]);

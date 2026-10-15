@@ -28,6 +28,7 @@ typedef struct DoomFrameGenerationFrame {
     DoomFrameGenerationImage depth;
     DoomFrameGenerationImage motion;
     DoomFrameGenerationImage hudless;
+    DoomFrameGenerationImage ui;
     float viewToClip[16];
     float clipToView[16];
     float clipToPrevClip[16];

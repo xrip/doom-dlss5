@@ -149,6 +149,7 @@ extern "C" int doom_frame_generation_resize(
     create_params.Width = extent.width;
     create_params.Height = extent.height;
     create_params.NativeBackbufferFormat = static_cast<unsigned int>(format);
+    NVSDK_NGX_Parameter_SetUI(context->parameters, NVSDK_NGX_DLSSG_Parameter_UserInterfaceRecompositionEnabled, 1);
 
     doom_dlss5_begin_fg_images();
     const NVSDK_NGX_Result create_result = NGX_VK_CREATE_DLSSG(
@@ -183,17 +184,21 @@ extern "C" int doom_frame_generation_evaluate(
         !valid_image(frame->interpolated, "interpolated output", error, capacity) ||
         !valid_image(frame->depth, "depth", error, capacity) ||
         !valid_image(frame->motion, "motion", error, capacity) ||
-        !valid_image(frame->hudless, "HUD-less", error, capacity))
+        !valid_image(frame->hudless, "HUD-less", error, capacity) ||
+        !valid_image(frame->ui, "UI", error, capacity))
         return 0;
     if (frame->backbuffer.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
         frame->depth.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
         frame->motion.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
-        frame->hudless.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        frame->hudless.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+        frame->ui.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
         return fail(error, capacity, "NGX input images must use shader-read-only layout");
     if (frame->interpolated.layout != VK_IMAGE_LAYOUT_GENERAL)
         return fail(error, capacity, "NGX interpolated output must use general layout");
     if (!same_extent(frame->backbuffer.extent, context->extent) ||
-        !same_extent(frame->interpolated.extent, context->extent))
+        !same_extent(frame->interpolated.extent, context->extent) ||
+        !same_extent(frame->hudless.extent, context->extent) ||
+        !same_extent(frame->ui.extent, context->extent))
         return fail(error, capacity, "backbuffer and interpolated output extents must match the created feature");
     if (frame->backbuffer.format != context->format || frame->interpolated.format != context->format)
         return fail(error, capacity, "backbuffer and interpolated output formats must match the created feature");
@@ -221,6 +226,8 @@ extern "C" int doom_frame_generation_evaluate(
         frame->motion, VK_IMAGE_ASPECT_COLOR_BIT, false);
     NVSDK_NGX_Resource_VK hudless = make_image_resource(
         frame->hudless, VK_IMAGE_ASPECT_COLOR_BIT, false);
+    NVSDK_NGX_Resource_VK ui = make_image_resource(
+        frame->ui, VK_IMAGE_ASPECT_COLOR_BIT, false);
     NVSDK_NGX_Resource_VK output = make_image_resource(
         frame->interpolated, VK_IMAGE_ASPECT_COLOR_BIT, true);
     NVSDK_NGX_Resource_VK disable{};
@@ -236,6 +243,7 @@ extern "C" int doom_frame_generation_evaluate(
     resources.pDepth = &depth;
     resources.pMVecs = &motion;
     resources.pHudless = &hudless;
+    resources.pUI = &ui;
     resources.pOutputInterpFrame = &output;
     resources.pOutputDisableInterpolation =
         frame->disable_interpolation == VK_NULL_HANDLE ? nullptr : &disable;

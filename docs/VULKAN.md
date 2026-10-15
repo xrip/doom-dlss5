@@ -9,25 +9,31 @@ WinMM music stay in C23. SPIR-V shaders are embedded in the executable.
 The current local build includes neural rendering:
 
 ```powershell
-./build/doom-raylib.exe ./build/MAP01.drmap --dlss5
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --dlss5
 ./tools/run-map.ps1 -Wad ./DOOM2.WAD -Map MAP01 -Dlss5
 ```
 
-DLSS starts enabled when built in, with style 1 and two NR passes.
-FG starts disabled; ray lighting starts enabled. `--dlss` and
-`--dlss5` are aliases. Use `--no-dlss`, `--no-fg`, and `--no-ray-lighting`
+DLSS starts in NR+SR mode when built in, with style 1 and two NR passes.
+F10 selects the separate Ray Reconstruction path. FG starts disabled;
+ray lighting starts enabled. `--dlss` enables the selected mode;
+`--dlss5` explicitly selects NR+SR. Use `--no-dlss`, `--no-fg`, and `--no-ray-lighting`
 to start with effects off. The GPU resources and runtimes remain loaded
 so effects can be switched back on without leaving the level.
 
-- F5 switches DLSS (NR + SR) on/off, keeping the selected SR mode.
+- F5 switches DLSS on/off, keeping the selected mode.
+- F10 switches between RR and NR+SR; they never run together.
 - F9 switches frame generation on/off, independently of NR and SR.
 - L switches ray lighting on/off.
-- F6 switches neural rendering on/off; SR stays active if selected.
+- F12 switches fullscreen; `--fullscreen` starts there.
+- F6 switches NR on/off in NR+SR mode; SR stays active if selected.
 - F7 cycles neural styles 0, 1, and 2.
 - F8 cycles 1, 2, and 4 neural passes.
 - `--nr-style 0|1|2` and `--nr-passes 1..4` set initial choices.
-- `--sr off|quality|balanced|performance` selects Super Resolution.
-- With `--dlss5`, SR defaults to performance; use `--sr off` for native-resolution NR.
+- `--rr` and `--no-rr` select the initial RR or NR+SR path.
+- `--no-nr` skips NR in the NR+SR path for SR-only comparisons.
+- `--sr off|quality|balanced|performance` selects the DLSS quality hint.
+- The scene always renders at 640x480. Quality hints do not change this size.
+- `--sr off` uses native 640x480 NR or RR DLAA, then a plain window-size blit.
 - The HUD shows the active mode, style, and pass count.
 
 Two passes are the default. More passes feed neural output through the model
@@ -37,7 +43,7 @@ level mesh or sprite assets. Native resolution is supported; Super
 Resolution is not required.
 
 ```powershell
-./build/doom-raylib.exe ./build/MAP01.drmap --dlss5 --nr-passes 4
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --no-rr --nr-passes 4
 ```
 
 Normal runs stay open until Esc or window close. Only `--frames N` ends
@@ -47,6 +53,13 @@ captures show real changes to shading and detail while much of the
 original pixel-art structure remains.
 
 ## Build
+
+All binaries use the single `build/` directory. The full DLSS-enabled
+executable also supports `--no-ngx`: this prevents NGX initialization and
+the compatibility relaunch, while retaining native rendering and ray
+lighting. DLSS/FG live toggles are unavailable in that process. It is the
+safe test mode while the updater-process issue is unresolved; a separate
+native validation build is not needed.
 
 Install CMake 3.28+, Ninja, Clang 19+, the Windows SDK/build tools, and a
 Vulkan SDK with `glslc`. A native-only build needs no NGX SDK:
@@ -116,7 +129,7 @@ folder and is copied by CMake. `DLSS5_SR_RUNTIME` can select another local copy.
 The tested 310.9.1 runtime has SHA-256
 `3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983`.
 
-Keep all four files together when moving the NR build. CTest uses a
+Keep the launcher and model DLLs together when moving the build. CTest uses a
 separate `nr-check/nvngx.dll` copy of the GPU test executable.
 
 The DLL supplies its Vulkan extension requirements. On the tested system:
@@ -131,11 +144,12 @@ fallback claiming NR is active.
 World color is display-encoded RGBA8, motion is RG16F, and depth is normal
 non-inverted D32. The model runs before HUD rendering. Motion is current
 minus previous normalized UV with positive Y downward; the bridge converts
-it to previous-minus-current pixel displacement. With SR enabled, world
-and NR use the SDK's recommended render size, followed by SR to display
-size and then a full-resolution HUD. A 32-sample Halton sequence jitters
+it to previous-minus-current pixel displacement. Lighting, depth, motion,
+and NR use a fixed 640x480 render size. NR+SR mode runs NR before SR;
+RR mode replaces both with one denoising and upscaling pass. The HUD and
+FG use display resolution. A 32-sample Halton sequence jitters
 the world; motion includes jitter and SR uses the `MVJittered` flag.
-With SR off there is no jitter or upscaling.
+RR uses jitter in native DLAA mode too; plain native output has no jitter.
 Camera cuts, teleports, resize, and mode/style/pass changes reset
 history. Each repeated pass has its own temporal state.
 
@@ -179,6 +193,25 @@ Ray lighting is optional; see its controls and limits below.
 
 ## Frame generation
 
+The pass order follows NVIDIA's [RR guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_RR.md)
+and [FG guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md):
+
+- RR mode: 640x480 raster/ray inputs -> RR denoise/upscale -> display encoding -> HUD -> FG -> present.
+- NR+SR mode: 640x480 raster/ray inputs -> NR -> SR -> HUD -> FG -> present.
+
+RR is not followed by a second SR pass, and experimental NR is not stacked
+with RR. NR preferences remain saved when RR is selected. The HUD marks NR
+as paused in RR mode. This avoids running repeated NR passes at window size.
+
+The public NGX RR adapter loads `nvngx_dlssd.dll` from the SDK's `rel` folder.
+It receives linear HDR RGBA16F ray-lit color, linear diffuse/specular albedos,
+world normals with roughness in alpha, view-space R32F depth, and RG16F motion.
+The current material model is diffuse-only: roughness is one and specular
+albedo is zero. RR gets one shadow sample per light with a small emitter
+extent. With RR off, deterministic center samples give hard shadows.
+With `--sr off`, RR runs as DLAA at 640x480. Tiny windows use at least
+640x480 AI output followed by a plain downsample; DLSS is never asked to downscale.
+
 Frame generation now uses the public NGX API and our own C23 Vulkan
 presentation worker. Streamline is no longer linked or required.
 
@@ -187,15 +220,15 @@ After configuring the NR build above, enable the optional FG adapter:
 ```powershell
 cmake --preset clang -DDOOM_FRAME_GENERATION=ON
 cmake --build --preset clang
-./build/doom-raylib.exe ./build/MAP01.drmap --dlss5 --fg
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --dlss5 --fg
 ./tools/run-map.ps1 -Wad ./DOOM2.WAD -Map MAP01 -FrameGeneration
 ```
 
 In this PoC, FG requires a DLSS-enabled build so the features share one NGX
-context. F5 can disable NR and SR while FG stays active.
+context. F5 can disable reconstruction while FG stays active.
 The run-map switch also enables `--dlss5`. CMake copies the SDK's signed
 `nvngx_dlssg.dll` beside the executable; `DLSS5_FG_RUNTIME` can select
-another local copy. Keep this fifth file with the four NR/SR files.
+another local copy. Keep it with the launcher and NR/SR/RR model DLLs.
 The tested runtime comes from the same pinned public SDK revision.
 
 The engine presents one interpolated frame followed by the real frame.
@@ -211,6 +244,11 @@ multiplied by two. These counts are not a measurement of monitor scanout.
 `--frames N` still counts application-rendered frames. `GPU-post` includes
 HUD and FG evaluation; the extra presentation-copy submission is not timed
 by that GPU query range.
+
+Backbuffer, HUD-less color, UI color/alpha, and interpolated output all use
+the final display size. Depth and motion remain 640x480. A separate UI image
+and the SDK's UI recomposition flag keep the HUD out of interpolated scene
+motion. Fullscreen transitions temporarily pause FG and reset history.
 
 The tested NGX FG runtime needs two integration workarounds through its
 Vulkan callbacks: transfer-write dependencies before SDK clears/fills,
@@ -235,28 +273,36 @@ Use `--ray-lighting`; `L` switches between ray-lit and classic output.
 It works alone or before NR, SR, and FG:
 
 ```powershell
-./build/doom-raylib.exe ./build/MAP01.drmap --ray-lighting --no-vsync
-./build/doom-raylib.exe ./build/MAP01.drmap --dlss5 --fg --ray-lighting
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --ray-lighting --no-vsync
+./build/doom-raylib.exe ./DOOM2.WAD MAP01 --dlss5 --fg --ray-lighting
 ./tools/run-map.ps1 -Wad ./DOOM2.WAD -Map MAP01 -FrameGeneration -RayLighting
 ```
 
-The renderer uses Vulkan ray queries, a world BLAS and one-instance TLAS.
-Doors, floors, and other world movers refit those structures when vertex
+The renderer uses Vulkan ray queries, a dynamic world BLAS, static BLASes
+for shared sprite/model poses, and a TLAS with one instance per object.
+Doors, floors, and other world movers refit only the world BLAS when vertex
 positions change. Texture/UV data stays current for scrolling and switches.
 Shadow rays test texture alpha, so grates do not cast solid rectangular
 shadows. Sky surfaces do not block the sun. Fullbright sprites stay bright.
 
-Lighting uses a fixed sun and up to four nearby ceiling lights derived
-from sector light levels and floor triangles. These are inferred sources,
-not authored Doom light fixtures. Ceiling sources emit downward; part of
-the original sector shading remains as ambient light. Ray lighting starts
-enabled; turning it off restores the classic palette path.
+Lighting uses a fixed sun and up to 32 sources selected by power, radius,
+and distance. A sector emits downward when it is brighter than its open
+neighbors; sky and closed ceilings do not emit. Torches, candles, lamps,
+and selected glowing pickups emit in all directions. The brightest palette
+texels determine sprite light color and height, so a torch emits near its
+flame rather than from its pole. Moving, hidden, and animated sprites update
+their light; flashing keys and armor emit only on their fullbright frames.
 
-This is direct diffuse lighting with hard shadows, not a path tracer,
-global illumination, ray reconstruction, or neural radiance caching.
-World geometry casts shadows; billboard sprites currently receive lighting
-but do not cast shadows. Nearest-light selection can change as the camera
-moves. There is no player flashlight in this stage.
+World geometry and current sprite quads cast alpha-tested shadows. Hidden
+sprites and transparent texels do not occlude. Rays ignore the receiving
+sprite and an emitting sprite's own quad. GPU matrices transform shared
+local pose vertices for raster rendering and motion vectors. Animation and
+camera-facing changes update the small TLAS, not every actor's mesh.
+
+This remains direct diffuse lighting, without GI, reflections, or neural
+radiance caching. Sprite shadows follow their 2D billboards. Source selection
+is capped at 32; these sources are inferred from original data, not authored
+physical light fixtures. Turning RT off restores the classic palette path.
 
 Required features include ray query, acceleration structures, buffer device
 address, shader int64, runtime descriptor arrays, and nonuniform sampled

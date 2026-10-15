@@ -8,7 +8,7 @@ param(
     [string]$Wad,
 
     [Alias('Output')]
-    [string]$OutputDirectory = 'build/maps',
+    [string]$OutputDirectory = 'build/cache/manual',
 
     [switch]$NoMusic,
 
@@ -18,7 +18,11 @@ param(
 
     [switch]$FrameGeneration,
 
-    [switch]$RayLighting
+    [switch]$RayLighting,
+
+    [switch]$Fullscreen,
+
+    [switch]$Voxels
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 try {
     $Map = $Map.ToUpperInvariant()
     $paths = Get-LevelPaths $Wad $OutputDirectory -NeedViewer
-    $scenePath = Convert-Level $paths $Map
+    $scenePath = Convert-Level $paths $Map -Voxels:$Voxels
 
     $viewerArguments = @($scenePath)
     if ($NoMusic) { $viewerArguments += '--no-music' }
@@ -35,6 +39,8 @@ try {
     if ($Dlss5 -or $FrameGeneration) { $viewerArguments += '--dlss5' }
     if ($FrameGeneration) { $viewerArguments += '--fg' }
     if ($RayLighting) { $viewerArguments += '--ray-lighting' }
+    if ($Fullscreen) { $viewerArguments += '--fullscreen' }
+    if ($Voxels) { $viewerArguments += '--voxels' }
     & $paths.Viewer @viewerArguments
     exit $LASTEXITCODE
 } catch {

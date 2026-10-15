@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "lighting.h"
 #ifdef DOOM_FRAME_GENERATION
 #include "frame_generation.h"
 #include "presentation.h"
@@ -24,6 +25,7 @@
 #include <string.h>
 
 enum { MAX_HUD_VERTICES = 65536 };
+enum { PIPELINE_WORLD, PIPELINE_HUD, PIPELINE_WALL_DEPTH, PIPELINE_SPRITE_DEPTH };
 
 static const uint32_t vertex_code[] = {
 #include "vulkan.vert.inc"
@@ -34,11 +36,26 @@ static const uint32_t fragment_code[] = {
 static const uint32_t ray_fragment_code[] = {
 #include "vulkan-ray.frag.inc"
 };
+static const uint32_t reconstruction_fragment_code[] = {
+#include "vulkan-reconstruction.frag.inc"
+};
+static const uint32_t resolve_code[] = {
+#include "resolve.comp.inc"
+};
 static const uint32_t hud_vertex_code[] = {
 #include "hud.vert.inc"
 };
 static const uint32_t hud_fragment_code[] = {
 #include "hud.frag.inc"
+};
+static const uint32_t depth_vertex_code[] = {
+#include "depth.vert.inc"
+};
+static const uint32_t depth_fragment_code[] = {
+#include "depth.frag.inc"
+};
+static const uint32_t depth_merge_code[] = {
+#include "depth-merge.frag.inc"
 };
 
 typedef struct {
@@ -73,33 +90,77 @@ typedef struct {
 } GpuVertex;
 
 typedef struct {
+    size_t first, count;
+} SpriteMesh;
+
+enum { OBJECT_VOXEL = 1, OBJECT_FULLBRIGHT = 2, OBJECT_HIDDEN = 4 };
+
+typedef struct {
+    float current[16], previous[16];
+    uint32_t mesh[4];
+} ObjectFrame;
+
+static_assert(sizeof(ObjectFrame) == 144, "object layout must match GLSL std430");
+
+typedef struct {
     uint64_t vertices, materials;
     uint32_t info[4];
-    float positions[4][4], colors[4][4];
+    uint32_t geometry[4];
+    RayLight lights[MAX_RAY_LIGHTS];
     float sun_direction[4], sun_color[4];
 } RayUniform;
-static_assert(sizeof(RayUniform) == 192, "ray uniform layout must match GLSL");
+static_assert(sizeof(RayUniform) == 80 + MAX_RAY_LIGHTS * sizeof(RayLight), "ray uniform layout must match GLSL");
 static_assert(offsetof(GpuVertex, texcoord) == 6 * sizeof(float), "ray UV layout must match GLSL");
+
+typedef struct {
+    VkAccelerationStructureKHR handle;
+    VkDeviceAddress address;
+    VkAccelerationStructureGeometryKHR geometry;
+    uint32_t triangles;
+    bool built;
+} RayMesh;
 
 typedef struct {
     bool enabled, built, geometry_dirty;
     uint32_t triangles;
-    GpuBuffer vertices, materials, uniform, instances, scratch, bottom_storage, top_storage;
-    VkAccelerationStructureKHR bottom, top;
+    GpuBuffer materials, uniform, instances, scratch, bottom_storage, top_storage;
+    size_t mesh_count;
+    uint32_t instance_count;
+    RayMesh *meshes;
+    VkAccelerationStructureKHR top;
     VkDeviceAddress scratch_address;
-    VkAccelerationStructureGeometryKHR geometry;
     VkAccelerationStructureGeometryKHR instance_geometry;
     VkDescriptorSetLayout layout;
     VkDescriptorPool pool;
     VkDescriptorSet descriptors;
-    Position *light_positions;
-    float *light_areas;
+    SceneLights *lights;
     PFN_vkCreateAccelerationStructureKHR create;
     PFN_vkDestroyAccelerationStructureKHR destroy;
     PFN_vkGetAccelerationStructureBuildSizesKHR sizes;
     PFN_vkGetAccelerationStructureDeviceAddressKHR address;
     PFN_vkCmdBuildAccelerationStructuresKHR build;
 } RayLighting;
+
+typedef struct {
+    bool enabled;
+    VkExtent2D extent;
+    GpuImage radiance, diffuse, normals, depth, specular, output, color;
+    VkDescriptorSetLayout layout;
+    VkDescriptorPool pool;
+    VkDescriptorSet descriptors;
+    VkPipelineLayout pipeline_layout;
+    VkPipeline pipeline;
+} RayReconstruction;
+
+typedef struct {
+    GpuImage depth;
+    bool initialized;
+    VkPipeline walls, merge;
+    VkDescriptorSetLayout layout;
+    VkDescriptorPool pool;
+    VkDescriptorSet descriptors;
+    VkPipelineLayout pipeline_layout;
+} SpriteOcclusion;
 
 typedef struct {
     float current_matrix[16];
@@ -119,6 +180,8 @@ struct Renderer {
     GLFWwindow *window;
     bool ray_lighting;
     RayLighting *lighting;
+    RayReconstruction *reconstruction;
+    SpriteOcclusion sprite_occlusion;
     bool frame_generation;
     bool no_vsync;
 #ifdef DOOM_FRAME_GENERATION
@@ -127,6 +190,7 @@ struct Renderer {
     VkSemaphore fg_image_available;
     GpuBuffer fg_disable;
     GpuImage hudless_target;
+    GpuImage ui_target;
     GpuImage interpolated_target;
     double fg_last_render_time, fg_frame_seconds;
     bool last_frame_generated;
@@ -163,7 +227,7 @@ struct Renderer {
     VkSwapchainKHR swapchain;
     bool swapchain_dirty;
     VkFormat swapchain_format;
-    VkExtent2D extent, work_extent;
+    VkExtent2D extent, work_extent, upscale_extent;
     VkImage *swapchain_images;
     VkSemaphore *present_semaphores;
     bool *swapchain_initialized;
@@ -185,9 +249,14 @@ struct Renderer {
     GpuImage depth_target;
     GpuImage output_target;
     GpuImage display_target;
+    GpuImage upscale_target;
     GpuBuffer color_readback;
     GpuBuffer motion_readback;
     GpuBuffer vertex_buffer;
+    GpuBuffer vertex_upload;
+    GpuBuffer object_buffer, object_upload;
+    ObjectFrame *objects;
+    bool sprite_meshes_uploaded;
     GpuVertex *vertices;
     size_t vertex_capacity;
     size_t scene_vertex_count;
@@ -195,9 +264,9 @@ struct Renderer {
     size_t sky_offset;
     size_t hud_offset;
     size_t *batch_offsets;
+    SpriteMesh *sprite_meshes;
     uint32_t *base_assets;
     Position *previous_scene_positions;
-    Position *previous_sprite_positions;
     RenderCamera previous_camera;
     bool history_valid;
     bool targets_initialized;
@@ -211,6 +280,11 @@ struct Renderer {
 };
 
 static const float pi_value = 3.14159265358979323846f;
+
+static bool reconstruction_active(const Renderer *renderer) {
+    return renderer->reconstruction && renderer->reconstruction->enabled &&
+           renderer->lighting && renderer->lighting->enabled;
+}
 
 static void require_vk(VkResult result, const char *operation) {
     if (result != VK_SUCCESS) fail("Vulkan %s failed (%d)", operation, (int)result);
@@ -931,8 +1005,16 @@ static bool create_swapchain(Renderer *renderer) {
 }
 
 static void destroy_targets(Renderer *renderer) {
+    destroy_image(renderer, &renderer->sprite_occlusion.depth);
+    renderer->sprite_occlusion.initialized = false;
+    if (renderer->reconstruction) {
+        RayReconstruction *rr = renderer->reconstruction;
+        GpuImage *images[] = {&rr->radiance, &rr->diffuse, &rr->normals, &rr->depth, &rr->specular, &rr->output, &rr->color};
+        for (unsigned index = 0; index < 7; ++index) destroy_image(renderer, images[index]);
+    }
 #ifdef DOOM_FRAME_GENERATION
     destroy_image(renderer, &renderer->hudless_target);
+    destroy_image(renderer, &renderer->ui_target);
     destroy_image(renderer, &renderer->interpolated_target);
 #endif
     destroy_image(renderer, &renderer->color_target);
@@ -940,6 +1022,7 @@ static void destroy_targets(Renderer *renderer) {
     destroy_image(renderer, &renderer->depth_target);
     destroy_image(renderer, &renderer->output_target);
     destroy_image(renderer, &renderer->display_target);
+    destroy_image(renderer, &renderer->upscale_target);
     destroy_buffer(renderer, &renderer->color_readback);
     destroy_buffer(renderer, &renderer->motion_readback);
     renderer->targets_initialized = false;
@@ -947,17 +1030,10 @@ static void destroy_targets(Renderer *renderer) {
 }
 
 static void create_targets(Renderer *renderer) {
-    renderer->work_extent = renderer->extent;
-#ifdef DOOM_DLSS5
-    if (renderer->upscale_mode) {
-        char error[512];
-        if (!doom_dlss5_render_size(renderer->dlss, (DoomDlss5SRMode)renderer->upscale_mode, renderer->extent,
-                                    &renderer->work_extent, error, sizeof(error)))
-            fail("Super Resolution render size: %s", error);
-        printf("Super Resolution: %ux%u -> %ux%u\n", renderer->work_extent.width, renderer->work_extent.height,
-               renderer->extent.width, renderer->extent.height);
-    }
-#endif
+    renderer->work_extent = (VkExtent2D){640, 480};
+    renderer->upscale_extent = (VkExtent2D){renderer->extent.width < 640 ? 640 : renderer->extent.width,
+                                          renderer->extent.height < 480 ? 480 : renderer->extent.height};
+    printf("Render: 640x480 -> display %ux%u\n", renderer->extent.width, renderer->extent.height);
     uint32_t width = renderer->work_extent.width, height = renderer->work_extent.height;
     VkFormatProperties color_properties, motion_properties, depth_properties;
     vkGetPhysicalDeviceFormatProperties(renderer->physical_device, VK_FORMAT_R8G8B8A8_UNORM, &color_properties);
@@ -995,13 +1071,59 @@ static void create_targets(Renderer *renderer) {
         motion_usage, VK_IMAGE_ASPECT_COLOR_BIT);
     renderer->depth_target = create_image(renderer, width, height, VK_FORMAT_D32_SFLOAT, depth_usage,
         VK_IMAGE_ASPECT_DEPTH_BIT);
+    renderer->sprite_occlusion.depth = create_image(renderer, width, height, VK_FORMAT_D32_SFLOAT,
+        depth_usage | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
     renderer->output_target = create_image(renderer, width, height, VK_FORMAT_R8G8B8A8_UNORM,
         output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
     renderer->display_target = create_image(renderer, renderer->extent.width, renderer->extent.height,
         VK_FORMAT_R8G8B8A8_UNORM, output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (renderer->upscale_mode) {
+        renderer->upscale_target = create_image(renderer, renderer->upscale_extent.width, renderer->upscale_extent.height,
+            VK_FORMAT_R8G8B8A8_UNORM, output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        VkCommandBuffer command = begin_immediate(renderer);
+        image_barrier(command, renderer->upscale_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        end_immediate(renderer, command);
+    }
+    if (renderer->reconstruction) {
+        RayReconstruction *rr = renderer->reconstruction;
+        rr->extent = renderer->upscale_mode ? renderer->upscale_extent : renderer->work_extent;
+        VkFormatProperties properties;
+        vkGetPhysicalDeviceFormatProperties(renderer->physical_device, VK_FORMAT_R16G16B16A16_SFLOAT, &properties);
+        VkFormatFeatureFlags required = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        if ((properties.optimalTilingFeatures & required) != required) fail("Ray reconstruction requires RGBA16F render targets");
+        VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        rr->radiance = create_image(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        rr->diffuse = create_image(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        rr->normals = create_image(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        rr->depth = create_image(renderer, width, height, VK_FORMAT_R32_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        rr->specular = create_image(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        rr->output = create_image(renderer, rr->extent.width, rr->extent.height,
+            VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        rr->color = create_image(renderer, rr->extent.width, rr->extent.height,
+            VK_FORMAT_R8G8B8A8_UNORM, output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        VkCommandBuffer command = begin_immediate(renderer);
+        GpuImage *images[] = {&rr->radiance, &rr->diffuse, &rr->normals, &rr->depth, &rr->specular, &rr->output, &rr->color};
+        for (unsigned index = 0; index < 7; ++index)
+            image_barrier(command, images[index]->handle, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        VkClearColorValue zero = {{0, 0, 0, 0}};
+        VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
+        vkCmdClearColorImage(command, rr->specular.handle, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+        image_barrier(command, rr->specular.handle, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        end_immediate(renderer, command);
+    }
 #ifdef DOOM_FRAME_GENERATION
     if (renderer->fg) {
         renderer->hudless_target = create_image(renderer, renderer->extent.width, renderer->extent.height,
+            VK_FORMAT_R8G8B8A8_UNORM, output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        renderer->ui_target = create_image(renderer, renderer->extent.width, renderer->extent.height,
             VK_FORMAT_R8G8B8A8_UNORM, output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
         renderer->interpolated_target = create_image(renderer, renderer->extent.width, renderer->extent.height,
             VK_FORMAT_R8G8B8A8_UNORM, output_usage, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -1030,8 +1152,37 @@ static void create_shader(Renderer *renderer, const uint32_t *code, size_t size,
     require_vk(vkCreateShaderModule(renderer->device, &create_info, NULL, module), "shader module creation");
 }
 
+static void create_reconstruction_pipeline(Renderer *renderer) {
+    RayReconstruction *rr = renderer->reconstruction;
+    VkDescriptorSetLayoutBinding bindings[] = {
+        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT}};
+    VkDescriptorSetLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2, .pBindings = bindings};
+    require_vk(vkCreateDescriptorSetLayout(renderer->device, &layout, NULL, &rr->layout), "RR resolve descriptor layout");
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
+    VkDescriptorPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &size};
+    require_vk(vkCreateDescriptorPool(renderer->device, &pool, NULL, &rr->pool), "RR resolve descriptor pool");
+    VkDescriptorSetAllocateInfo allocation = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = rr->pool, .descriptorSetCount = 1, .pSetLayouts = &rr->layout};
+    require_vk(vkAllocateDescriptorSets(renderer->device, &allocation, &rr->descriptors), "RR resolve descriptor set");
+    VkPipelineLayoutCreateInfo pipeline_layout = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1, .pSetLayouts = &rr->layout};
+    require_vk(vkCreatePipelineLayout(renderer->device, &pipeline_layout, NULL, &rr->pipeline_layout), "RR resolve pipeline layout");
+    VkShaderModule module;
+    create_shader(renderer, resolve_code, sizeof(resolve_code), &module);
+    VkComputePipelineCreateInfo pipeline = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .layout = rr->pipeline_layout, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main"}};
+    require_vk(vkCreateComputePipelines(renderer->device, VK_NULL_HANDLE, 1, &pipeline, NULL, &rr->pipeline), "RR resolve pipeline");
+    vkDestroyShaderModule(renderer->device, module, NULL);
+}
+
 static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule vertex_shader,
-    VkShaderModule fragment_shader, bool depth_test, bool depth_write, bool hud) {
+    VkShaderModule fragment_shader, bool depth_test, bool depth_write, unsigned kind) {
+    bool hud = kind == PIPELINE_HUD;
+    bool depth_only = kind == PIPELINE_WALL_DEPTH || kind == PIPELINE_SPRITE_DEPTH;
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
          .module = vertex_shader, .pName = "main"},
@@ -1049,12 +1200,14 @@ static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule ve
         {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(GpuVertex, color)}
     };
     VkVertexInputAttributeDescription hud_attributes[] = {attributes[0], attributes[4]};
+    VkVertexInputAttributeDescription world_attributes[] = {attributes[0], attributes[1], attributes[2], attributes[3]};
+    VkVertexInputAttributeDescription depth_attributes[] = {attributes[0], attributes[2]};
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = hud ? 2u : 4u,
-        .pVertexAttributeDescriptions = hud ? hud_attributes : attributes
+        .vertexAttributeDescriptionCount = hud || depth_only ? 2u : 4u,
+        .pVertexAttributeDescriptions = hud ? hud_attributes : depth_only ? depth_attributes : world_attributes
     };
     VkPipelineInputAssemblyStateCreateInfo assembly = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -1085,11 +1238,11 @@ static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule ve
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = depth_test,
         .depthWriteEnable = depth_write,
-        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .depthCompareOp = kind == PIPELINE_SPRITE_DEPTH ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL,
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE
     };
-    VkPipelineColorBlendAttachmentState blend_attachments[2] = {
+    VkPipelineColorBlendAttachmentState blend_attachments[6] = {
         {.blendEnable = hud, .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
          .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = VK_BLEND_OP_ADD,
          .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
@@ -1098,10 +1251,14 @@ static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule ve
         {.blendEnable = VK_FALSE, .colorWriteMask = hud ? 0u :
              VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT}
     };
+    unsigned attachment_count = depth_only ? 0u : hud ? 1u : renderer->reconstruction ? 6u : 2u;
+    for (unsigned index = 2; index < attachment_count; ++index)
+        blend_attachments[index].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
-        .attachmentCount = hud ? 1u : 2u,
+        .attachmentCount = attachment_count,
         .pAttachments = blend_attachments
     };
     VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -1110,10 +1267,11 @@ static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule ve
         .dynamicStateCount = 2,
         .pDynamicStates = dynamic_states
     };
-    VkFormat formats[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT};
+    VkFormat formats[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT,
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32_SFLOAT};
     VkPipelineRenderingCreateInfo rendering = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = hud ? 1u : 2u,
+        .colorAttachmentCount = attachment_count,
         .pColorAttachmentFormats = formats,
         .depthAttachmentFormat = hud ? VK_FORMAT_UNDEFINED : VK_FORMAT_D32_SFLOAT
     };
@@ -1130,7 +1288,7 @@ static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule ve
         .pDepthStencilState = &depth,
         .pColorBlendState = &blend,
         .pDynamicState = &dynamic,
-        .layout = renderer->pipeline_layout,
+        .layout = kind == PIPELINE_SPRITE_DEPTH ? renderer->sprite_occlusion.pipeline_layout : renderer->pipeline_layout,
         .renderPass = VK_NULL_HANDLE,
         .subpass = 0
     };
@@ -1140,18 +1298,49 @@ static VkPipeline create_graphics_pipeline(Renderer *renderer, VkShaderModule ve
     return pipeline;
 }
 
+static void create_sprite_occlusion_pipelines(Renderer *renderer) {
+    SpriteOcclusion *occlusion = &renderer->sprite_occlusion;
+    VkDescriptorSetLayoutBinding binding = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo layout = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &binding};
+    require_vk(vkCreateDescriptorSetLayout(renderer->device, &layout, NULL, &occlusion->layout), "sprite depth layout");
+    VkDescriptorPoolSize size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &size};
+    require_vk(vkCreateDescriptorPool(renderer->device, &pool, NULL, &occlusion->pool), "sprite depth pool");
+    VkDescriptorSetAllocateInfo allocation = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = occlusion->pool, .descriptorSetCount = 1, .pSetLayouts = &occlusion->layout};
+    require_vk(vkAllocateDescriptorSets(renderer->device, &allocation, &occlusion->descriptors), "sprite depth set");
+    VkDescriptorSetLayout layouts[] = {renderer->descriptor_layout, occlusion->layout};
+    VkPipelineLayoutCreateInfo pipeline_layout = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 2, .pSetLayouts = layouts};
+    require_vk(vkCreatePipelineLayout(renderer->device, &pipeline_layout, NULL, &occlusion->pipeline_layout), "sprite depth pipeline layout");
+    VkShaderModule vertex, fragment, merge;
+    create_shader(renderer, depth_vertex_code, sizeof(depth_vertex_code), &vertex);
+    create_shader(renderer, depth_fragment_code, sizeof(depth_fragment_code), &fragment);
+    create_shader(renderer, depth_merge_code, sizeof(depth_merge_code), &merge);
+    occlusion->walls = create_graphics_pipeline(renderer, vertex, fragment, true, true, PIPELINE_WALL_DEPTH);
+    occlusion->merge = create_graphics_pipeline(renderer, vertex, merge, true, true, PIPELINE_SPRITE_DEPTH);
+    vkDestroyShaderModule(renderer->device, vertex, NULL);
+    vkDestroyShaderModule(renderer->device, fragment, NULL);
+    vkDestroyShaderModule(renderer->device, merge, NULL);
+}
+
 static void create_pipelines(Renderer *renderer) {
-    VkDescriptorSetLayoutBinding bindings[3] = {
+    VkDescriptorSetLayoutBinding bindings[4] = {
         {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
         {.binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+         .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT}
     };
     VkDescriptorSetLayoutCreateInfo descriptor_layout = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 3,
+        .bindingCount = 4,
         .pBindings = bindings
     };
     require_vk(vkCreateDescriptorSetLayout(renderer->device, &descriptor_layout, NULL,
@@ -1167,29 +1356,32 @@ static void create_pipelines(Renderer *renderer) {
                "pipeline layout creation");
     VkShaderModule vertex_shader, fragment_shader, hud_vertex, hud_fragment;
     create_shader(renderer, vertex_code, sizeof(vertex_code), &vertex_shader);
-    create_shader(renderer, renderer->lighting ? ray_fragment_code : fragment_code,
-        renderer->lighting ? sizeof(ray_fragment_code) : sizeof(fragment_code), &fragment_shader);
-    renderer->scene_pipeline = create_graphics_pipeline(renderer, vertex_shader, fragment_shader, true, true, false);
-    renderer->sky_pipeline = create_graphics_pipeline(renderer, vertex_shader, fragment_shader, false, false, false);
+    create_shader(renderer, renderer->reconstruction ? reconstruction_fragment_code : renderer->lighting ? ray_fragment_code : fragment_code,
+        renderer->reconstruction ? sizeof(reconstruction_fragment_code) : renderer->lighting ? sizeof(ray_fragment_code) : sizeof(fragment_code), &fragment_shader);
+    renderer->scene_pipeline = create_graphics_pipeline(renderer, vertex_shader, fragment_shader, true, true, PIPELINE_WORLD);
+    renderer->sky_pipeline = create_graphics_pipeline(renderer, vertex_shader, fragment_shader, false, false, PIPELINE_WORLD);
     create_shader(renderer, hud_vertex_code, sizeof(hud_vertex_code), &hud_vertex);
     create_shader(renderer, hud_fragment_code, sizeof(hud_fragment_code), &hud_fragment);
-    renderer->hud_pipeline = create_graphics_pipeline(renderer, hud_vertex, hud_fragment, false, false, true);
+    renderer->hud_pipeline = create_graphics_pipeline(renderer, hud_vertex, hud_fragment, false, false, PIPELINE_HUD);
     vkDestroyShaderModule(renderer->device, hud_vertex, NULL);
     vkDestroyShaderModule(renderer->device, hud_fragment, NULL);
     vkDestroyShaderModule(renderer->device, vertex_shader, NULL);
     vkDestroyShaderModule(renderer->device, fragment_shader, NULL);
+    if (renderer->reconstruction) create_reconstruction_pipeline(renderer);
+    create_sprite_occlusion_pipelines(renderer);
 }
 
 static void create_descriptors(Renderer *renderer) {
     uint32_t count = (uint32_t)renderer->texture_count;
-    VkDescriptorPoolSize sizes[2] = {
+    VkDescriptorPoolSize sizes[3] = {
         {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = count * 2},
-        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = count}
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = count},
+        {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = count}
     };
     VkDescriptorPoolCreateInfo pool = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = count,
-        .poolSizeCount = 2,
+        .poolSizeCount = 3,
         .pPoolSizes = sizes
     };
     require_vk(vkCreateDescriptorPool(renderer->device, &pool, NULL, &renderer->descriptor_pool),
@@ -1213,7 +1405,8 @@ static void create_descriptors(Renderer *renderer) {
             .imageView = renderer->palette.view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorBufferInfo uniform = {.buffer = renderer->uniform_buffer.handle,
             .offset = 0, .range = sizeof(FrameUniform)};
-        VkWriteDescriptorSet writes[3] = {
+        VkDescriptorBufferInfo objects = {.buffer = renderer->object_buffer.handle, .range = renderer->object_buffer.size};
+        VkWriteDescriptorSet writes[4] = {
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = renderer->descriptor_sets[index],
              .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
              .pImageInfo = &texture},
@@ -1222,9 +1415,12 @@ static void create_descriptors(Renderer *renderer) {
              .pImageInfo = &palette},
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = renderer->descriptor_sets[index],
              .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-             .pBufferInfo = &uniform}
+             .pBufferInfo = &uniform},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = renderer->descriptor_sets[index],
+             .dstBinding = 3, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+             .pBufferInfo = &objects}
         };
-        vkUpdateDescriptorSets(renderer->device, 3, writes, 0, NULL);
+        vkUpdateDescriptorSets(renderer->device, 4, writes, 0, NULL);
     }
 }
 
@@ -1360,39 +1556,62 @@ static void build_scene_vertices(Renderer *renderer, Scene *scene, const Special
     }
 }
 
-static void build_sprites(Renderer *renderer, const Scene *scene, const RenderCamera *camera) {
-    float sprite_yaw = atan2f(-(camera->target.z - camera->position.z), camera->target.x - camera->position.x) - pi_value * 0.5f;
-    float current_cosine = cosf(sprite_yaw), current_sine = sinf(sprite_yaw);
-    for (size_t sprite_index = 0; sprite_index < scene->sprite_count; ++sprite_index) {
-        const Sprite *sprite = &scene->sprites[sprite_index];
-        const Asset *asset = &scene->assets[sprite->asset];
+static bool sprite_crosses_planes(const Scene *scene, const Sprite *sprite) {
+    if (sprite->hidden || sprite->sector >= scene->sector_count || scene_sprite_voxel(scene, sprite)) return false;
+    const SceneSector *sector = &scene->sectors[sprite->sector];
+    const Asset *asset = &scene->assets[sprite->asset];
+    return sprite->position.y + (float)asset->top / 32.0f > sector->ceiling ||
+           sprite->position.y + ((float)asset->top - (float)asset->height) / 32.0f < sector->floor;
+}
+
+static void build_sprite_meshes(Renderer *renderer, const Scene *scene) {
+    const unsigned order[6] = {0, 1, 2, 0, 2, 3};
+    for (size_t index = 0; index < scene->asset_count * 2; ++index) {
+        const SpriteMesh *mesh = &renderer->sprite_meshes[index];
+        if (!mesh->count) continue;
+        const Asset *asset = &scene->assets[index / 2];
+        bool voxel = (index & 1) != 0;
         float left = -(float)asset->left / 32.0f;
         float right = ((float)asset->width - (float)asset->left) / 32.0f;
         float top = (float)asset->top / 32.0f;
         float bottom = ((float)asset->top - (float)asset->height) / 32.0f;
-        const float local_x[6] = {left, right, right, left, right, left};
-        const float local_y[6] = {bottom, bottom, top, bottom, top, top};
-        const float tex_u[6] = {0, 1, 1, 0, 1, 0};
-        const float tex_v[6] = {1, 1, 0, 1, 0, 0};
-        unsigned shade = sprite->fullbright ? 0 : sector_shade(&scene->sectors[sprite->sector]);
-        size_t first = renderer->sprite_offset + sprite_index * 6;
-        for (size_t corner = 0; corner < 6; ++corner) {
-            Position current = {
-                sprite->position.x + current_cosine * local_x[corner],
-                sprite->position.y + local_y[corner],
-                sprite->position.z - current_sine * local_x[corner]
-            };
-            Position previous = current;
-            if (renderer->history_valid) previous = renderer->previous_sprite_positions[sprite_index * 6 + corner];
-            fill_vertex(&renderer->vertices[first + corner], current, previous, tex_u[corner], tex_v[corner],
-                        shade, sprite->fullbright ? 2.0f : 0.0f);
-        }
-        for (size_t corner = 0; corner < 6; ++corner) {
-            GpuVertex *vertex = &renderer->vertices[first + corner];
-            renderer->previous_sprite_positions[sprite_index * 6 + corner] =
-                (Position){vertex->position[0], vertex->position[1], vertex->position[2]};
+        const SceneVertex quad[4] = {{left, bottom, 0, 0, 1}, {right, bottom, 0, 1, 1},
+            {right, top, 0, 1, 0}, {left, top, 0, 0, 0}};
+        for (size_t vertex = 0; vertex < mesh->count; ++vertex) {
+            const SceneVertex *point = voxel ? &asset->voxel.vertices[vertex] : &quad[order[vertex]];
+            Position position = {point->x, point->y, point->z};
+            fill_vertex(&renderer->vertices[mesh->first + vertex], position, position, point->u, point->v, 0, 0);
         }
     }
+}
+
+static bool build_sprites(Renderer *renderer, const Scene *scene, const RenderCamera *camera) {
+    bool crosses_planes = false;
+    float facing = atan2f(-(camera->target.z - camera->position.z), camera->target.x - camera->position.x) - pi_value * 0.5f;
+    for (size_t index = 0; index < scene->sprite_count; ++index) {
+        const Sprite *sprite = &scene->sprites[index];
+        bool voxel = scene_sprite_voxel(scene, sprite) != NULL;
+        const SpriteMesh *mesh = &renderer->sprite_meshes[sprite->asset * 2 + voxel];
+        ObjectFrame *object = &renderer->objects[index + 1];
+        bool reset = !renderer->history_valid || object->mesh[0] != mesh->first ||
+            (object->mesh[2] & OBJECT_HIDDEN) != 0 || sprite->hidden;
+        memcpy(object->previous, object->current, sizeof(object->previous));
+        float yaw = voxel ? sprite->yaw : facing;
+        float cosine = cosf(yaw), sine = sinf(yaw);
+        float anchor = voxel ? (sprite->ceiling ? scene->sectors[sprite->sector].ceiling :
+            scene->sectors[sprite->sector].floor) : sprite->position.y;
+        const float matrix[16] = {cosine, 0, -sine, 0, 0, 1, 0, 0, sine, 0, cosine, 0,
+            sprite->position.x, anchor, sprite->position.z, 1};
+        memcpy(object->current, matrix, sizeof(matrix));
+        if (reset) memcpy(object->previous, object->current, sizeof(object->previous));
+        object->mesh[0] = (uint32_t)mesh->first;
+        object->mesh[1] = voxel ? scene->voxel_asset : sprite->asset;
+        object->mesh[2] = (voxel ? OBJECT_VOXEL : 0u) | (sprite->fullbright ? OBJECT_FULLBRIGHT : 0u) |
+            (sprite->hidden ? OBJECT_HIDDEN : 0u);
+        object->mesh[3] = sprite->fullbright ? 0 : sector_shade(&scene->sectors[sprite->sector]);
+        crosses_planes |= sprite_crosses_planes(scene, sprite);
+    }
+    return crosses_planes;
 }
 
 static void build_sky(Renderer *renderer, const RenderCamera *camera) {
@@ -1488,15 +1707,18 @@ static VkDeviceAddress buffer_address(Renderer *renderer, const GpuBuffer *buffe
     return vkGetBufferDeviceAddress(renderer->device, &info);
 }
 
-static VkAccelerationStructureBuildGeometryInfoKHR ray_build_info(RayLighting *ray, bool top) {
+static VkAccelerationStructureBuildGeometryInfoKHR ray_build_info(RayLighting *ray, RayMesh *mesh) {
+    bool top = mesh == NULL;
+    bool update = top ? ray->built : mesh == &ray->meshes[0] && mesh->built;
     return (VkAccelerationStructureBuildGeometryInfoKHR){
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
         .type = top ? VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR : VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-        .flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
-        .mode = ray->built ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
-        .srcAccelerationStructure = ray->built ? (top ? ray->top : ray->bottom) : VK_NULL_HANDLE,
-        .dstAccelerationStructure = top ? ray->top : ray->bottom,
-        .geometryCount = 1, .pGeometries = top ? &ray->instance_geometry : &ray->geometry,
+        .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+            (top || mesh == &ray->meshes[0] ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0),
+        .mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .srcAccelerationStructure = update ? (top ? ray->top : mesh->handle) : VK_NULL_HANDLE,
+        .dstAccelerationStructure = top ? ray->top : mesh->handle,
+        .geometryCount = 1, .pGeometries = top ? &ray->instance_geometry : &mesh->geometry,
         .scratchData.deviceAddress = ray->scratch_address};
 }
 
@@ -1512,11 +1734,12 @@ static void create_ray_storage(Renderer *renderer, VkAccelerationStructureTypeKH
 
 static void create_ray_lighting(Renderer *renderer, const Scene *scene) {
     if (!renderer->ray_lighting) return;
-    if (renderer->scene_vertex_count > UINT32_MAX || renderer->scene_vertex_count % 3)
-        fail("Ray lighting requires a bounded triangle-list mesh");
     RayLighting *ray = renderer->lighting = allocate(1, sizeof(*ray));
     ray->enabled = true;
     ray->triangles = (uint32_t)(renderer->scene_vertex_count / 3);
+    ray->mesh_count = scene->asset_count * 2 + 1;
+    ray->instance_count = (uint32_t)scene->sprite_count + 1;
+    ray->meshes = allocate(ray->mesh_count, sizeof(*ray->meshes));
     ray->create = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(renderer->device, "vkCreateAccelerationStructureKHR");
     ray->destroy = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(renderer->device, "vkDestroyAccelerationStructureKHR");
     ray->sizes = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(renderer->device, "vkGetAccelerationStructureBuildSizesKHR");
@@ -1528,84 +1751,82 @@ static void create_ray_lighting(Renderer *renderer, const Scene *scene) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
     VkPhysicalDeviceProperties2 properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &acceleration};
     vkGetPhysicalDeviceProperties2(renderer->physical_device, &properties);
-    if (ray->triangles > acceleration.maxPrimitiveCount ||
+    if (ray->instance_count > acceleration.maxInstanceCount ||
         scene->asset_count + 2 > properties.properties.limits.maxPerStageDescriptorSamplers ||
         scene->asset_count + 2 > properties.properties.limits.maxPerStageDescriptorSampledImages ||
-        scene->asset_count + 5 > properties.properties.limits.maxPerStageResources)
+        scene->asset_count + 6 > properties.properties.limits.maxPerStageResources)
         fail("Map exceeds ray lighting device limits");
-    VkDeviceSize vertex_bytes = renderer->scene_vertex_count * sizeof(GpuVertex);
-    if (!vertex_bytes) vertex_bytes = sizeof(GpuVertex);
     VkDeviceSize material_bytes = (VkDeviceSize)(ray->triangles ? ray->triangles : 1) * sizeof(uint32_t);
-    ray->vertices = create_buffer(renderer, vertex_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
     ray->materials = create_buffer(renderer, material_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
     ray->uniform = create_buffer(renderer, sizeof(RayUniform) + material_bytes,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
-    ray->instances = create_buffer(renderer, sizeof(VkAccelerationStructureInstanceKHR),
+    ray->instances = create_buffer(renderer, ray->instance_count * sizeof(VkAccelerationStructureInstanceKHR),
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
-    ray->geometry = (VkAccelerationStructureGeometryKHR){
-        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-        .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-        .geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
-            .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT, .vertexData.deviceAddress = buffer_address(renderer, &ray->vertices),
-            .vertexStride = sizeof(GpuVertex), .maxVertex = renderer->scene_vertex_count ? (uint32_t)renderer->scene_vertex_count - 1 : 0,
-            .indexType = VK_INDEX_TYPE_NONE_KHR}};
     ray->instance_geometry = (VkAccelerationStructureGeometryKHR){
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
         .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
         .geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
             .data.deviceAddress = buffer_address(renderer, &ray->instances)}};
-    VkAccelerationStructureBuildGeometryInfoKHR bottom = ray_build_info(ray, false), top = ray_build_info(ray, true);
-    VkAccelerationStructureBuildSizesInfoKHR bottom_sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    VkAccelerationStructureBuildSizesInfoKHR *sizes = allocate(ray->mesh_count, sizeof(*sizes));
+    VkDeviceSize storage_size = 0, scratch_size = 0;
+    for (size_t index = 0; index < ray->mesh_count; ++index) {
+        size_t first = 0, count = renderer->scene_vertex_count;
+        if (index) {
+            const SpriteMesh *source = &renderer->sprite_meshes[index - 1];
+            first = source->first; count = source->count;
+            if (!count) continue;
+        }
+        RayMesh *mesh = &ray->meshes[index];
+        mesh->triangles = (uint32_t)(count / 3);
+        if (mesh->triangles > acceleration.maxPrimitiveCount) fail("Ray mesh exceeds the device primitive limit");
+        mesh->geometry = (VkAccelerationStructureGeometryKHR){
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+            .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+            .geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
+                .vertexData.deviceAddress = buffer_address(renderer, &renderer->vertex_buffer) + first * sizeof(GpuVertex),
+                .vertexStride = sizeof(GpuVertex), .maxVertex = count ? (uint32_t)count - 1 : 0,
+                .indexType = VK_INDEX_TYPE_NONE_KHR}};
+        VkAccelerationStructureBuildGeometryInfoKHR build = ray_build_info(ray, mesh);
+        sizes[index].sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        ray->sizes(renderer->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build, &mesh->triangles, &sizes[index]);
+        storage_size = ((storage_size + 255) & ~UINT64_C(255)) + sizes[index].accelerationStructureSize;
+        if (sizes[index].buildScratchSize > scratch_size) scratch_size = sizes[index].buildScratchSize;
+        if (sizes[index].updateScratchSize > scratch_size) scratch_size = sizes[index].updateScratchSize;
+    }
+    ray->bottom_storage = create_buffer(renderer, storage_size,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
+    VkDeviceSize offset = 0;
+    for (size_t index = 0; index < ray->mesh_count; ++index) {
+        if (!sizes[index].accelerationStructureSize) continue;
+        offset = (offset + 255) & ~UINT64_C(255);
+        VkAccelerationStructureCreateInfoKHR info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+            .buffer = ray->bottom_storage.handle, .offset = offset, .size = sizes[index].accelerationStructureSize,
+            .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR};
+        require_vk(ray->create(renderer->device, &info, NULL, &ray->meshes[index].handle), "shared pose ray structure");
+        VkAccelerationStructureDeviceAddressInfoKHR address = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+            .accelerationStructure = ray->meshes[index].handle};
+        ray->meshes[index].address = ray->address(renderer->device, &address);
+        offset += sizes[index].accelerationStructureSize;
+    }
+    free(sizes);
+    VkAccelerationStructureBuildGeometryInfoKHR top = ray_build_info(ray, NULL);
     VkAccelerationStructureBuildSizesInfoKHR top_sizes = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    uint32_t one = 1;
-    ray->sizes(renderer->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bottom, &ray->triangles, &bottom_sizes);
-    ray->sizes(renderer->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &top, &one, &top_sizes);
-    create_ray_storage(renderer, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, bottom_sizes.accelerationStructureSize,
-                       &ray->bottom_storage, &ray->bottom);
+    ray->sizes(renderer->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &top, &ray->instance_count, &top_sizes);
     create_ray_storage(renderer, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, top_sizes.accelerationStructureSize,
-                       &ray->top_storage, &ray->top);
-    VkDeviceSize scratch_size = bottom_sizes.buildScratchSize;
-    VkDeviceSize candidates[] = {bottom_sizes.updateScratchSize, top_sizes.buildScratchSize, top_sizes.updateScratchSize};
-    for (unsigned index = 0; index < 3; ++index) if (candidates[index] > scratch_size) scratch_size = candidates[index];
+        &ray->top_storage, &ray->top);
+    if (top_sizes.buildScratchSize > scratch_size) scratch_size = top_sizes.buildScratchSize;
+    if (top_sizes.updateScratchSize > scratch_size) scratch_size = top_sizes.updateScratchSize;
     VkDeviceSize alignment = acceleration.minAccelerationStructureScratchOffsetAlignment;
     ray->scratch = create_buffer(renderer, scratch_size + alignment,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
     ray->scratch_address = (buffer_address(renderer, &ray->scratch) + alignment - 1) & ~(alignment - 1);
-    VkAccelerationStructureDeviceAddressInfoKHR address = {
-        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR, .accelerationStructure = ray->bottom};
-    VkAccelerationStructureInstanceKHR instance = {.transform.matrix = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}},
-        .mask = 255, .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
-        .accelerationStructureReference = ray->address(renderer->device, &address)};
-    memcpy(ray->instances.mapped, &instance, sizeof(instance));
-    ray->light_positions = allocate(scene->sector_count, sizeof(*ray->light_positions));
-    ray->light_areas = allocate(scene->sector_count, sizeof(*ray->light_areas));
-    float *largest = allocate(scene->sector_count, sizeof(*largest));
-    for (size_t index = 0; index < scene->batch_count; ++index) {
-        const Batch *batch = &scene->batches[index];
-        if (batch->plane != SURFACE_FLOOR || batch->owner >= scene->sector_count) continue;
-        for (size_t vertex = 0; vertex + 2 < batch->count; vertex += 3) {
-            const SceneVertex *first = &batch->vertices[vertex], *second = first + 1, *third = first + 2;
-            float area = fabsf((second->x - first->x) * (third->z - first->z) -
-                               (third->x - first->x) * (second->z - first->z)) * 0.5f;
-            ray->light_areas[batch->owner] += area;
-            if (area > largest[batch->owner]) {
-                largest[batch->owner] = area;
-                ray->light_positions[batch->owner] = (Position){(first->x + second->x + third->x) / 3,
-                    0, (first->z + second->z + third->z) / 3};
-            }
-        }
-    }
-    free(largest);
-    for (size_t index = 0; index < scene->batch_count; ++index) {
-        const Batch *batch = &scene->batches[index];
-        if (batch->plane == SURFACE_CEILING && batch->sky && batch->owner < scene->sector_count)
-            ray->light_areas[batch->owner] = 0;
-    }
+    ray->lights = scene_lights_create(scene);
     uint32_t textures = (uint32_t)scene->asset_count;
     VkDescriptorSetLayoutBinding bindings[] = {
         {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
@@ -1637,10 +1858,12 @@ static void create_ray_lighting(Renderer *renderer, const Scene *scene) {
          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &uniform}};
     vkUpdateDescriptorSets(renderer->device, 3, writes, 0, NULL);
     free(images);
-    printf("Ray lighting: %u world triangles, scratch alignment %llu\n", ray->triangles, (unsigned long long)alignment);
+    printf("Ray lighting: %zu world + %zu shared pose triangles, %u instances, scratch alignment %llu\n",
+        renderer->scene_vertex_count / 3, (renderer->sky_offset - renderer->sprite_offset) / 3,
+        ray->instance_count, (unsigned long long)alignment);
 }
 
-static void ray_barrier(Renderer *renderer, VkPipelineStageFlags2 source, VkAccessFlags2 source_access,
+static void memory_barrier(Renderer *renderer, VkPipelineStageFlags2 source, VkAccessFlags2 source_access,
                        VkPipelineStageFlags2 destination, VkAccessFlags2 destination_access) {
     VkMemoryBarrier2 barrier = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
         .srcStageMask = source, .srcAccessMask = source_access,
@@ -1650,37 +1873,23 @@ static void ray_barrier(Renderer *renderer, VkPipelineStageFlags2 source, VkAcce
     vkCmdPipelineBarrier2(renderer->command_buffer, &dependency);
 }
 
+static void upload_vertex_range(Renderer *renderer, size_t first, size_t count) {
+    if (!count) return;
+    VkDeviceSize offset = first * sizeof(GpuVertex), bytes = count * sizeof(GpuVertex);
+    memcpy((uint8_t *)renderer->vertex_upload.mapped + offset, renderer->vertices + first, (size_t)bytes);
+    VkBufferCopy copy = {.srcOffset = offset, .dstOffset = offset, .size = bytes};
+    vkCmdCopyBuffer(renderer->command_buffer, renderer->vertex_upload.handle, renderer->vertex_buffer.handle, 1, &copy);
+}
+
 static void update_ray_lighting(Renderer *renderer, const Scene *scene, const RenderCamera *camera) {
     RayLighting *ray = renderer->lighting;
     if (!ray) return;
-    RayUniform uniform = {.vertices = buffer_address(renderer, &ray->vertices),
+    RayUniform uniform = {.vertices = buffer_address(renderer, &renderer->vertex_buffer),
         .materials = buffer_address(renderer, &ray->materials),
         .info = {0, ray->enabled, sizeof(GpuVertex) / sizeof(float), (uint32_t)scene->asset_count},
+        .geometry = {0, reconstruction_active(renderer), renderer->jitter_index, 0},
         .sun_direction = {-0.4f, 0.85f, 0.3f, 0.8f}, .sun_color = {1, 0.97f, 0.9f, 0}};
-    float distances[4] = {FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX};
-    for (size_t sector = 0; sector < scene->sector_count; ++sector) {
-        const SceneSector *room = &scene->sectors[sector];
-        float height = room->ceiling - room->floor;
-        if (ray->light_areas[sector] < 4 || height < 0.5f || !room->light) continue;
-        Position position = ray->light_positions[sector];
-        position.y = room->ceiling - 0.15f;
-        Position delta = vector_subtract(position, camera->position);
-        float distance = vector_dot(delta, delta);
-        unsigned slot = 0;
-        while (slot < 4 && distance >= distances[slot]) ++slot;
-        if (slot == 4) continue;
-        for (unsigned index = 3; index > slot; --index) {
-            distances[index] = distances[index - 1];
-            memcpy(uniform.positions[index], uniform.positions[index - 1], sizeof(uniform.positions[index]));
-            memcpy(uniform.colors[index], uniform.colors[index - 1], sizeof(uniform.colors[index]));
-        }
-        distances[slot] = distance;
-        uniform.positions[slot][0] = position.x; uniform.positions[slot][1] = position.y; uniform.positions[slot][2] = position.z;
-        uniform.positions[slot][3] = fminf(64, fmaxf(height * 2, sqrtf(ray->light_areas[sector]) * 2 + height));
-        uniform.colors[slot][0] = 1; uniform.colors[slot][1] = 1; uniform.colors[slot][2] = 1;
-        uniform.colors[slot][3] = 12.0f * fminf(1, (float)room->light / 255.0f);
-        if (uniform.info[0] < 4) ++uniform.info[0];
-    }
+    uniform.info[0] = scene_lights_collect(ray->lights, scene, camera->position, uniform.lights);
     memcpy(ray->uniform.mapped, &uniform, sizeof(uniform));
     if (!ray->enabled && ray->built) return;
     uint32_t *materials = (uint32_t *)((uint8_t *)ray->uniform.mapped + sizeof(RayUniform));
@@ -1694,29 +1903,44 @@ static void update_ray_lighting(Renderer *renderer, const Scene *scene, const Re
         for (size_t triangle = 0; triangle < batch->count / 3; ++triangle)
             materials[first + triangle] = hidden ? UINT32_MAX : batch->asset;
     }
-    if (renderer->scene_vertex_count) {
-        VkBufferCopy copy = {.size = renderer->scene_vertex_count * sizeof(GpuVertex)};
-        vkCmdCopyBuffer(renderer->command_buffer, renderer->vertex_buffer.handle, ray->vertices.handle, 1, &copy);
-    }
     VkBufferCopy material_copy = {.srcOffset = sizeof(RayUniform), .size = ray->materials.size};
     vkCmdCopyBuffer(renderer->command_buffer, ray->uniform.handle, ray->materials.handle, 1, &material_copy);
-    ray_barrier(renderer, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_MEMORY_READ_BIT);
-    if (!ray->built || ray->geometry_dirty) {
-        VkAccelerationStructureBuildGeometryInfoKHR bottom = ray_build_info(ray, false), top = ray_build_info(ray, true);
-        VkAccelerationStructureBuildRangeInfoKHR bottom_range = {.primitiveCount = ray->triangles}, top_range = {.primitiveCount = 1};
-        const VkAccelerationStructureBuildRangeInfoKHR *range = &bottom_range;
-        ray->build(renderer->command_buffer, 1, &bottom, &range);
-        ray_barrier(renderer, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_WRITE_BIT,
+    memory_barrier(renderer, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    for (size_t index = 0; index < ray->mesh_count; ++index) {
+        RayMesh *mesh = &ray->meshes[index];
+        if (!mesh->handle || (mesh->built && (index != 0 || !ray->geometry_dirty))) continue;
+        VkAccelerationStructureBuildGeometryInfoKHR build = ray_build_info(ray, mesh);
+        VkAccelerationStructureBuildRangeInfoKHR range = {.primitiveCount = mesh->triangles};
+        const VkAccelerationStructureBuildRangeInfoKHR *ranges = &range;
+        ray->build(renderer->command_buffer, 1, &build, &ranges);
+        memory_barrier(renderer, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-        range = &top_range;
-        ray->build(renderer->command_buffer, 1, &top, &range);
-        ray_barrier(renderer, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
-        ray->built = true;
-        ray->geometry_dirty = false;
+        mesh->built = true;
     }
+    VkAccelerationStructureInstanceKHR *instances = ray->instances.mapped;
+    for (size_t index = 0; index < ray->instance_count; ++index) {
+        const ObjectFrame *object = &renderer->objects[index];
+        size_t mesh_index = index ? (size_t)scene->sprites[index - 1].asset * 2 +
+            ((object->mesh[2] & OBJECT_VOXEL) != 0) + 1 : 0;
+        VkAccelerationStructureInstanceKHR instance = {.instanceCustomIndex = (uint32_t)index & 0xffffffu,
+            .mask = index && scene->sprites[index - 1].hidden ? 0u : 255u,
+            .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
+            .accelerationStructureReference = ray->meshes[mesh_index].address};
+        for (unsigned row = 0; row < 3; ++row)
+            for (unsigned column = 0; column < 4; ++column)
+                instance.transform.matrix[row][column] = index ? object->current[column * 4 + row] :
+                    (row == column ? 1.0f : 0.0f);
+        instances[index] = instance;
+    }
+    VkAccelerationStructureBuildGeometryInfoKHR top = ray_build_info(ray, NULL);
+    VkAccelerationStructureBuildRangeInfoKHR range = {.primitiveCount = ray->instance_count};
+    const VkAccelerationStructureBuildRangeInfoKHR *ranges = &range;
+    ray->build(renderer->command_buffer, 1, &top, &ranges);
+    memory_barrier(renderer, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    ray->built = true;
+    ray->geometry_dirty = false;
 }
 
 static void destroy_ray_lighting(Renderer *renderer) {
@@ -1725,11 +1949,15 @@ static void destroy_ray_lighting(Renderer *renderer) {
     vkDestroyDescriptorPool(renderer->device, ray->pool, NULL);
     vkDestroyDescriptorSetLayout(renderer->device, ray->layout, NULL);
     ray->destroy(renderer->device, ray->top, NULL);
-    ray->destroy(renderer->device, ray->bottom, NULL);
-    GpuBuffer *buffers[] = {&ray->vertices, &ray->materials, &ray->uniform, &ray->instances,
+    for (size_t index = 0; index < ray->mesh_count; ++index)
+        if (ray->meshes[index].handle) ray->destroy(renderer->device, ray->meshes[index].handle, NULL);
+    GpuBuffer *buffers[] = {&ray->materials, &ray->uniform, &ray->instances,
         &ray->scratch, &ray->bottom_storage, &ray->top_storage};
-    for (unsigned index = 0; index < 7; ++index) destroy_buffer(renderer, buffers[index]);
-    free(ray->light_positions); free(ray->light_areas); free(ray);
+    for (size_t index = 0; index < sizeof(buffers) / sizeof(buffers[0]); ++index)
+        destroy_buffer(renderer, buffers[index]);
+    scene_lights_destroy(ray->lights);
+    free(ray->meshes);
+    free(ray);
     renderer->lighting = NULL;
 }
 
@@ -1770,6 +1998,8 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
     unsigned upscale_mode = options.upscale_mode;
     if (upscale_mode > 3 || (upscale_mode && !dlss_enabled)) fail("Invalid Super Resolution configuration");
     if (frame_generation && !dlss_enabled) fail("Frame generation currently requires --dlss5");
+    if (options.ray_reconstruction && (!dlss_enabled || !options.ray_lighting))
+        fail("Ray reconstruction requires the DLSS and ray lighting paths");
 #ifndef DOOM_DLSS5
     if (dlss_enabled) fail("DLSS 5 requires DOOM_DLSS5=ON, the public NGX SDK, and its NR runtime; see docs/VULKAN.md");
 #endif
@@ -1777,6 +2007,10 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
     Renderer *renderer = allocate(1, sizeof(*renderer));
     renderer->window = window;
     renderer->ray_lighting = options.ray_lighting;
+    if (options.ray_reconstruction) {
+        renderer->reconstruction = allocate(1, sizeof(*renderer->reconstruction));
+        renderer->reconstruction->enabled = true;
+    }
     renderer->dlss_enabled = dlss_enabled;
     renderer->neural_passes = 1;
     renderer->upscale_mode = upscale_mode;
@@ -1828,16 +2062,33 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
     }
     renderer->scene_vertex_count = vertex_count;
     renderer->sprite_offset = vertex_count;
-    if (scene->sprite_count > (SIZE_MAX - vertex_count) / 6) fail("Sprite vertex count overflow");
-    vertex_count += scene->sprite_count * 6;
+    renderer->sprite_meshes = allocate(scene->asset_count * 2, sizeof(*renderer->sprite_meshes));
+    for (size_t index = 0; index < scene->sprite_count; ++index) {
+        const Sprite *sprite = &scene->sprites[index];
+        bool voxel = scene_sprite_voxel(scene, sprite) != NULL;
+        for (uint32_t frame = 0; frame <= sprite->frame_count; ++frame) {
+            uint32_t asset = frame == sprite->frame_count ? sprite->asset : sprite->frames[frame].asset;
+            SpriteMesh *mesh = &renderer->sprite_meshes[(size_t)asset * 2 + voxel];
+            mesh->count = voxel ? scene->assets[asset].voxel.count : 6;
+        }
+    }
+    for (size_t index = 0; index < scene->asset_count * 2; ++index) {
+        SpriteMesh *mesh = &renderer->sprite_meshes[index];
+        if (!mesh->count) continue;
+        if (mesh->count > 16000000 || vertex_count > 16000000 - mesh->count)
+            fail("Shared pose geometry exceeds sixteen million vertices");
+        mesh->first = vertex_count;
+        vertex_count += mesh->count;
+    }
     renderer->sky_offset = vertex_count;
     if (vertex_count > SIZE_MAX - 36 - MAX_HUD_VERTICES) fail("Renderer vertex count overflow");
     renderer->hud_offset = vertex_count + 36;
     renderer->vertex_capacity = renderer->hud_offset + MAX_HUD_VERTICES;
     if (renderer->vertex_capacity > UINT64_MAX / sizeof(GpuVertex)) fail("Renderer vertex buffer is too large");
     renderer->vertices = allocate(renderer->vertex_capacity, sizeof(*renderer->vertices));
+    renderer->objects = allocate(scene->sprite_count + 1, sizeof(*renderer->objects));
+    build_sprite_meshes(renderer, scene);
     renderer->previous_scene_positions = allocate(renderer->scene_vertex_count, sizeof(*renderer->previous_scene_positions));
-    renderer->previous_sprite_positions = allocate(scene->sprite_count * 6, sizeof(*renderer->previous_sprite_positions));
     char font_character[2] = {' ', '\0'};
     EasyFontVertex font_probe[256];
     for (int character = 32; character <= 126; ++character) {
@@ -1846,8 +2097,18 @@ Renderer *renderer_create(GLFWwindow *window, const Scene *scene, RendererOption
         if ((size_t)quad_count > renderer->font_quads_per_character)
             renderer->font_quads_per_character = (size_t)quad_count;
     }
-    renderer->vertex_buffer = create_buffer(renderer, renderer->vertex_capacity * sizeof(GpuVertex),
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | (renderer->ray_lighting ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : 0),
+    VkDeviceSize vertex_bytes = renderer->vertex_capacity * sizeof(GpuVertex);
+    renderer->vertex_buffer = create_buffer(renderer, vertex_bytes,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        (renderer->ray_lighting ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR : 0),
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
+    renderer->vertex_upload = create_buffer(renderer, vertex_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+    VkDeviceSize object_bytes = (scene->sprite_count + 1) * sizeof(ObjectFrame);
+    renderer->object_buffer = create_buffer(renderer, object_bytes,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false);
+    renderer->object_upload = create_buffer(renderer, object_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
     renderer->uniform_buffer = create_buffer(renderer, sizeof(FrameUniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
@@ -1958,22 +2219,111 @@ static void draw_world(Renderer *renderer, const Scene *scene, uint32_t sky_asse
         vkCmdDraw(renderer->command_buffer, (uint32_t)batch->count, 1,
                   (uint32_t)renderer->batch_offsets[index], 0);
     }
+}
+
+static void draw_sprites(Renderer *renderer, const Scene *scene, VkPipeline pipeline,
+                         VkPipelineLayout layout, bool overflow) {
+    vkCmdBindPipeline(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(renderer->command_buffer, 0, 1, &renderer->vertex_buffer.handle, &offset);
     for (size_t index = 0; index < scene->sprite_count; ++index) {
         const Sprite *sprite = &scene->sprites[index];
-        if (sprite->hidden) continue;
+        if (sprite->hidden || sprite_crosses_planes(scene, sprite) != overflow) continue;
+        const ObjectFrame *object = &renderer->objects[index + 1];
+        const SpriteMesh *mesh = &renderer->sprite_meshes[(size_t)sprite->asset * 2 +
+            ((object->mesh[2] & OBJECT_VOXEL) != 0)];
         vkCmdBindDescriptorSets(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            renderer->pipeline_layout, 0, 1, &renderer->descriptor_sets[sprite->asset], 0, NULL);
-        vkCmdDraw(renderer->command_buffer, 6, 1, (uint32_t)(renderer->sprite_offset + index * 6), 0);
+            layout, 0, 1, &renderer->descriptor_sets[object->mesh[1]], 0, NULL);
+        vkCmdDraw(renderer->command_buffer, (uint32_t)mesh->count, 1, (uint32_t)mesh->first, (uint32_t)index + 1);
     }
 }
 
-static void draw_hud(Renderer *renderer, size_t hud_count) {
-    if (!hud_count) return;
+static void attachment_barrier(Renderer *renderer) {
+    VkPipelineStageFlags2 stages = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    VkAccessFlags2 writes = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    memory_barrier(renderer, stages, writes, stages,
+        writes | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+}
+
+static void render_sprites(Renderer *renderer, const Scene *scene, const VkRenderingInfo *world) {
+    SpriteOcclusion *occlusion = &renderer->sprite_occlusion;
+    image_barrier(renderer->command_buffer, occlusion->depth.handle, VK_IMAGE_ASPECT_DEPTH_BIT,
+        occlusion->initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    VkRenderingAttachmentInfo depth = *world->pDepthAttachment;
+    depth.imageView = occlusion->depth.view;
+    VkRenderingInfo pass = *world;
+    pass.colorAttachmentCount = 0;
+    pass.pColorAttachments = NULL;
+    pass.pDepthAttachment = &depth;
+    vkCmdBeginRendering(renderer->command_buffer, &pass);
+    vkCmdBindPipeline(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, occlusion->walls);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(renderer->command_buffer, 0, 1, &renderer->vertex_buffer.handle, &offset);
+    for (size_t index = 0; index < scene->batch_count; ++index) {
+        const Batch *batch = &scene->batches[index];
+        if (batch->sky || batch->plane == SURFACE_FLOOR || batch->plane == SURFACE_CEILING || !batch->count) continue;
+        vkCmdBindDescriptorSets(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout, 0, 1, &renderer->descriptor_sets[batch->asset], 0, NULL);
+        vkCmdDraw(renderer->command_buffer, (uint32_t)batch->count, 1, (uint32_t)renderer->batch_offsets[index], 0);
+    }
+    vkCmdEndRendering(renderer->command_buffer);
+    attachment_barrier(renderer);
+    VkRenderingAttachmentInfo colors[6];
+    for (uint32_t index = 0; index < world->colorAttachmentCount; ++index) {
+        colors[index] = world->pColorAttachments[index];
+        colors[index].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    }
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    pass.colorAttachmentCount = world->colorAttachmentCount;
+    pass.pColorAttachments = colors;
+    vkCmdBeginRendering(renderer->command_buffer, &pass);
+    if (renderer->lighting)
+        vkCmdBindDescriptorSets(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout, 1, 1, &renderer->lighting->descriptors, 0, NULL);
+    draw_sprites(renderer, scene, renderer->scene_pipeline, renderer->pipeline_layout, true);
+    vkCmdEndRendering(renderer->command_buffer);
+    image_barrier(renderer->command_buffer, occlusion->depth.handle, VK_IMAGE_ASPECT_DEPTH_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    VkDescriptorImageInfo image = {renderer->sampler, occlusion->depth.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = occlusion->descriptors, .dstBinding = 0, .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &image};
+    vkUpdateDescriptorSets(renderer->device, 1, &write, 0, NULL);
+    depth.imageView = renderer->depth_target.view;
+    pass.colorAttachmentCount = 0;
+    pass.pColorAttachments = NULL;
+    vkCmdBeginRendering(renderer->command_buffer, &pass);
+    vkCmdBindDescriptorSets(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        occlusion->pipeline_layout, 1, 1, &occlusion->descriptors, 0, NULL);
+    draw_sprites(renderer, scene, occlusion->merge, occlusion->pipeline_layout, true);
+    vkCmdEndRendering(renderer->command_buffer);
+    attachment_barrier(renderer);
+    pass.colorAttachmentCount = world->colorAttachmentCount;
+    pass.pColorAttachments = colors;
+    vkCmdBeginRendering(renderer->command_buffer, &pass);
+    if (renderer->lighting)
+        vkCmdBindDescriptorSets(renderer->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            renderer->pipeline_layout, 1, 1, &renderer->lighting->descriptors, 0, NULL);
+    draw_sprites(renderer, scene, renderer->scene_pipeline, renderer->pipeline_layout, false);
+    vkCmdEndRendering(renderer->command_buffer);
+    occlusion->initialized = true;
+}
+
+static void draw_hud(Renderer *renderer, size_t hud_count, VkImageView target, bool clear) {
+    if (!hud_count && !clear) return;
     VkRenderingAttachmentInfo attachments[1] = {
         {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-         .imageView = renderer->display_target.view,
+         .imageView = target,
          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+         .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
          .storeOp = VK_ATTACHMENT_STORE_OP_STORE}
     };
     VkRenderingInfo rendering = {
@@ -2021,8 +2371,9 @@ static void write_frame_uniform(Renderer *renderer, const RenderCamera *camera) 
     uniform.extent[2] = (float)renderer->extent.width;
     uniform.extent[3] = (float)renderer->extent.height;
     if (!renderer->history_valid) renderer->jitter_index = 0;
-    renderer->jitter[0] = renderer->upscale_mode ? halton(renderer->jitter_index + 1, 2) - 0.5f : 0;
-    renderer->jitter[1] = renderer->upscale_mode ? halton(renderer->jitter_index + 1, 3) - 0.5f : 0;
+    bool temporal = renderer->upscale_mode || reconstruction_active(renderer);
+    renderer->jitter[0] = temporal ? halton(renderer->jitter_index + 1, 2) - 0.5f : 0;
+    renderer->jitter[1] = temporal ? halton(renderer->jitter_index + 1, 3) - 0.5f : 0;
     for (unsigned axis = 0; axis < 2; ++axis) {
         float previous = renderer->history_valid ? renderer->previous_jitter[axis] : renderer->jitter[axis];
         uniform.jitter[axis] = renderer->jitter[axis] * 2 / uniform.extent[axis];
@@ -2036,6 +2387,51 @@ static DoomDlss5Image dlss_image(const GpuImage *image, VkExtent2D extent) {
     return (DoomDlss5Image){.image = image->handle, .view = image->view, .format = image->format,
                            .width = extent.width, .height = extent.height,
                            .layout = VK_IMAGE_LAYOUT_GENERAL};
+}
+
+static void evaluate_reconstruction(Renderer *renderer) {
+    RayReconstruction *rr = renderer->reconstruction;
+    DoomDlss5ReconstructionFrame frame = {
+        .color = dlss_image(&rr->radiance, renderer->work_extent),
+        .motion = dlss_image(&renderer->motion_target, renderer->work_extent),
+        .depth = dlss_image(&rr->depth, renderer->work_extent),
+        .diffuse_albedo = dlss_image(&rr->diffuse, renderer->work_extent),
+        .specular_albedo = dlss_image(&rr->specular, renderer->work_extent),
+        .normals_roughness = dlss_image(&rr->normals, renderer->work_extent),
+        .output = dlss_image(&rr->output, rr->extent),
+        .mode = rr->extent.width == renderer->work_extent.width && rr->extent.height == renderer->work_extent.height ?
+            DOOM_DLSS5_SR_OFF : (DoomDlss5SRMode)renderer->upscale_mode,
+        .jitter_x_pixels = renderer->jitter[0], .jitter_y_pixels = renderer->jitter[1],
+        .reset_history = !renderer->history_valid};
+    char error[512];
+    if (!doom_dlss5_reconstruct(renderer->dlss, renderer->command_buffer, &frame, error, sizeof(error)))
+        fail("DLSS Ray Reconstruction: %s", error);
+    image_barrier(renderer->command_buffer, rr->output.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    image_barrier(renderer->command_buffer, rr->color.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    VkDescriptorImageInfo images[] = {
+        {.imageView = rr->output.view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+        {.imageView = rr->color.view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet writes[2] = {0};
+    for (unsigned index = 0; index < 2; ++index)
+        writes[index] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = rr->descriptors, .dstBinding = index, .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &images[index]};
+    vkUpdateDescriptorSets(renderer->device, 2, writes, 0, NULL);
+    vkCmdBindPipeline(renderer->command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, rr->pipeline);
+    vkCmdBindDescriptorSets(renderer->command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+        rr->pipeline_layout, 0, 1, &rr->descriptors, 0, NULL);
+    vkCmdDispatch(renderer->command_buffer, (rr->extent.width + 7) / 8, (rr->extent.height + 7) / 8, 1);
+    image_barrier(renderer->command_buffer, rr->color.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    if (!renderer->has_frame) puts("DLSS Ray Reconstruction evaluation recorded");
 }
 
 static void evaluate_dlss(Renderer *renderer) {
@@ -2077,20 +2473,22 @@ static void evaluate_dlss(Renderer *renderer) {
 }
 #endif
 
-static void resolve_output(Renderer *renderer) {
-    const GpuImage *source = renderer->dlss_enabled ? &renderer->output_target : &renderer->color_target;
+static void resolve_output(Renderer *renderer, const GpuImage *source, VkExtent2D source_extent, bool upscale) {
+#ifndef DOOM_DLSS5
+    (void)upscale;
+#endif
     VkImageLayout old_layout = renderer->targets_initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
     VkPipelineStageFlags2 prior_stage = renderer->targets_initialized ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_2_NONE;
     VkAccessFlags2 prior_access = renderer->targets_initialized ? VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT : 0;
 #ifdef DOOM_DLSS5
-    if (renderer->upscale_mode) {
-        image_barrier(renderer->command_buffer, renderer->display_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
-            old_layout, VK_IMAGE_LAYOUT_GENERAL, prior_stage, prior_access,
+    if (upscale && renderer->upscale_mode) {
+        image_barrier(renderer->command_buffer, renderer->upscale_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, prior_stage, prior_access,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         DoomDlss5Frame frame = {.color = dlss_image(source, renderer->work_extent),
                                 .motion = dlss_image(&renderer->motion_target, renderer->work_extent),
                                 .depth = dlss_image(&renderer->depth_target, renderer->work_extent),
-                                .output = dlss_image(&renderer->display_target, renderer->extent)};
+                                .output = dlss_image(&renderer->upscale_target, renderer->upscale_extent)};
         char error[512];
         if (!doom_dlss5_upscale(renderer->dlss, renderer->command_buffer, &frame,
                                 (DoomDlss5SRMode)renderer->upscale_mode,
@@ -2098,30 +2496,32 @@ static void resolve_output(Renderer *renderer) {
                                 error, sizeof(error)))
             fail("Super Resolution evaluation: %s", error);
         if (!renderer->has_frame) puts("DLSS Super Resolution evaluation recorded");
-        return;
+        source = &renderer->upscale_target;
+        source_extent = renderer->upscale_extent;
     }
 #endif
     image_barrier(renderer->command_buffer, source->handle, VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
     image_barrier(renderer->command_buffer, renderer->display_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
         old_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, prior_stage, prior_access,
-        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    VkImageCopy copy = {
+        VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageBlit copy = {
         .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
         .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
-        .extent = {renderer->extent.width, renderer->extent.height, 1}
+        .srcOffsets = {{0, 0, 0}, {(int32_t)source_extent.width, (int32_t)source_extent.height, 1}},
+        .dstOffsets = {{0, 0, 0}, {(int32_t)renderer->extent.width, (int32_t)renderer->extent.height, 1}}
     };
-    vkCmdCopyImage(renderer->command_buffer, source->handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        renderer->display_target.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    vkCmdBlitImage(renderer->command_buffer, source->handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        renderer->display_target.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy, VK_FILTER_NEAREST);
     image_barrier(renderer->command_buffer, source->handle, VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     image_barrier(renderer->command_buffer, renderer->display_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
 }
 
@@ -2207,8 +2607,8 @@ static void fg_buffer_barrier(Renderer *renderer, VkPipelineStageFlags2 source, 
 
 static void evaluate_frame_generation(Renderer *renderer, const RenderCamera *camera) {
     GpuImage *inputs[] = {&renderer->display_target, &renderer->depth_target,
-                         &renderer->motion_target, &renderer->hudless_target};
-    for (unsigned index = 0; index < 4; ++index)
+                         &renderer->motion_target, &renderer->hudless_target, &renderer->ui_target};
+    for (unsigned index = 0; index < 5; ++index)
         image_barrier(renderer->command_buffer, inputs[index]->handle,
             index == 1 ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2232,6 +2632,7 @@ static void evaluate_frame_generation(Renderer *renderer, const RenderCamera *ca
         .depth = frame_generation_image(&renderer->depth_target, renderer->work_extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         .motion = frame_generation_image(&renderer->motion_target, renderer->work_extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         .hudless = frame_generation_image(&renderer->hudless_target, renderer->extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+        .ui = frame_generation_image(&renderer->ui_target, renderer->extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         .cameraPosition = {camera->position.x, camera->position.y, camera->position.z},
         .fovy = camera->fovy * pi_value / 180.0f,
         .aspect = (float)renderer->extent.width / (float)renderer->extent.height,
@@ -2261,7 +2662,7 @@ static void evaluate_frame_generation(Renderer *renderer, const RenderCamera *ca
     char error[512];
     if (!doom_frame_generation_evaluate(renderer->fg, &frame, error, sizeof(error)))
         fail("Frame generation inputs: %s", error);
-    for (unsigned index = 0; index < 4; ++index)
+    for (unsigned index = 0; index < 5; ++index)
         image_barrier(renderer->command_buffer, inputs[index]->handle,
             index == 1 ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -2404,6 +2805,13 @@ bool renderer_set_ray_lighting(Renderer *renderer, bool enabled) {
     if (!renderer->lighting) return false;
     if (renderer->lighting->enabled != enabled) renderer->history_valid = false;
     renderer->lighting->enabled = enabled;
+    return true;
+}
+
+bool renderer_set_ray_reconstruction(Renderer *renderer, bool enabled) {
+    if (!renderer->reconstruction) return false;
+    if (renderer->reconstruction->enabled != enabled) renderer->history_valid = false;
+    renderer->reconstruction->enabled = enabled;
     return true;
 }
 
@@ -2554,17 +2962,28 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
     size_t hud_count = 0;
     uint32_t sky_asset = sky_asset_index(scene);
     build_scene_vertices(renderer, scene, specials);
-    build_sprites(renderer, scene, camera);
+    bool sprite_clipping = build_sprites(renderer, scene, camera);
     build_sky(renderer, camera);
     build_hud(renderer, &hud_count);
-    size_t active_vertices = renderer->hud_offset + hud_count;
-    memcpy(renderer->vertex_buffer.mapped, renderer->vertices, active_vertices * sizeof(*renderer->vertices));
     write_frame_uniform(renderer, camera);
 
     VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     require_vk(vkBeginCommandBuffer(renderer->command_buffer, &begin), "frame command begin");
     if (renderer->profile_pool) vkCmdResetQueryPool(renderer->command_buffer, renderer->profile_pool, 0, 5);
     profile_stamp(renderer, 0);
+    upload_vertex_range(renderer, 0, renderer->scene_vertex_count);
+    if (!renderer->sprite_meshes_uploaded) {
+        upload_vertex_range(renderer, renderer->sprite_offset, renderer->sky_offset - renderer->sprite_offset);
+        renderer->sprite_meshes_uploaded = true;
+    }
+    upload_vertex_range(renderer, renderer->sky_offset, 36 + hud_count);
+    memcpy(renderer->object_upload.mapped, renderer->objects, (size_t)renderer->object_buffer.size);
+    VkBufferCopy objects_copy = {.size = renderer->object_buffer.size};
+    vkCmdCopyBuffer(renderer->command_buffer, renderer->object_upload.handle, renderer->object_buffer.handle, 1, &objects_copy);
+    memory_barrier(renderer, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | (renderer->lighting ?
+            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : 0),
+        VK_ACCESS_2_MEMORY_READ_BIT);
     update_ray_lighting(renderer, scene, camera);
     VkPipelineStageFlags2 prior_stage = renderer->targets_initialized ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT :
                                                                        VK_PIPELINE_STAGE_2_NONE;
@@ -2592,7 +3011,7 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
     VkClearValue color_clear = {.color = {{0, 0, 0, 1}}};
     VkClearValue motion_clear = {.color = {{0, 0, 0, 0}}};
     VkClearValue depth_clear = {.depthStencil = {1, 0}};
-    VkRenderingAttachmentInfo attachments[2] = {
+    VkRenderingAttachmentInfo attachments[6] = {
         {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
          .imageView = renderer->color_target.view,
          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2606,6 +3025,20 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
          .clearValue = motion_clear}
     };
+    if (renderer->reconstruction) {
+        RayReconstruction *rr = renderer->reconstruction;
+        GpuImage *images[] = {&rr->radiance, &rr->diffuse, &rr->normals, &rr->depth};
+        for (unsigned index = 0; index < 4; ++index) {
+            image_barrier(renderer->command_buffer, images[index]->handle, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            attachments[index + 2] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .imageView = images[index]->view, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                .clearValue = index == 3 ? (VkClearValue){.color = {{10000, 0, 0, 0}}} : color_clear};
+        }
+    }
     VkRenderingAttachmentInfo depth = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = renderer->depth_target.view,
@@ -2618,7 +3051,7 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = {{0, 0}, renderer->work_extent},
         .layerCount = 1,
-        .colorAttachmentCount = 2,
+        .colorAttachmentCount = renderer->reconstruction ? 6u : 2u,
         .pColorAttachments = attachments,
         .pDepthAttachment = &depth
     };
@@ -2628,7 +3061,10 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
     vkCmdSetViewport(renderer->command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(renderer->command_buffer, 0, 1, &scissor);
     draw_world(renderer, scene, sky_asset);
+    if (!sprite_clipping && scene->sprite_count)
+        draw_sprites(renderer, scene, renderer->scene_pipeline, renderer->pipeline_layout, false);
     vkCmdEndRendering(renderer->command_buffer);
+    if (sprite_clipping) render_sprites(renderer, scene, &rendering);
     profile_stamp(renderer, 1);
     image_barrier(renderer->command_buffer, renderer->color_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -2643,11 +3079,26 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    if (renderer->reconstruction) {
+        RayReconstruction *rr = renderer->reconstruction;
+        GpuImage *images[] = {&rr->radiance, &rr->diffuse, &rr->normals, &rr->depth};
+        for (unsigned index = 0; index < 4; ++index)
+            image_barrier(renderer->command_buffer, images[index]->handle, VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    }
+    bool rr_active = reconstruction_active(renderer);
 #ifdef DOOM_DLSS5
-    if (renderer->dlss_enabled) evaluate_dlss(renderer);
+    if (rr_active) {
+        evaluate_reconstruction(renderer);
+    } else if (renderer->dlss_enabled) evaluate_dlss(renderer);
 #endif
     profile_stamp(renderer, 2);
-    resolve_output(renderer);
+    const GpuImage *output = renderer->dlss_enabled ? &renderer->output_target : &renderer->color_target;
+    if (rr_active) output = &renderer->reconstruction->color;
+    resolve_output(renderer, output, rr_active ? renderer->reconstruction->extent : renderer->work_extent,
+                   !rr_active && renderer->upscale_mode != 0);
     profile_stamp(renderer, 3);
 #ifdef DOOM_FRAME_GENERATION
     copy_hudless(renderer);
@@ -2658,7 +3109,7 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        draw_hud(renderer, hud_count);
+        draw_hud(renderer, hud_count, renderer->display_target.view, false);
         image_barrier(renderer->command_buffer, renderer->display_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2666,6 +3117,16 @@ void renderer_draw(Renderer *renderer, Scene *scene, const Specials *specials,
     }
 #ifdef DOOM_FRAME_GENERATION
     if (renderer->frame_generation) {
+        image_barrier(renderer->command_buffer, renderer->ui_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+            renderer->targets_initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        draw_hud(renderer, hud_count, renderer->ui_target.view, true);
+        image_barrier(renderer->command_buffer, renderer->ui_target.handle, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
         evaluate_frame_generation(renderer, camera);
         renderer->targets_initialized = true;
         profile_stamp(renderer, 4);
@@ -2910,7 +3371,7 @@ void renderer_destroy(Renderer *renderer) {
     profile_read(renderer);
     if (renderer->profile_frames > 16) {
         double samples = (double)(renderer->profile_frames - 16);
-        printf("PROFILE %ux%u work=%ux%u samples=%u frame=%.3fms GPU-world=%.3fms GPU-NR=%.3fms GPU-SR=%.3fms GPU-post=%.3fms\n",
+        printf("PROFILE %ux%u work=%ux%u samples=%u frame=%.3fms GPU-world=%.3fms GPU-AI=%.3fms GPU-SR=%.3fms GPU-post=%.3fms\n",
                renderer->extent.width, renderer->extent.height, renderer->work_extent.width, renderer->work_extent.height,
                renderer->profile_frames - 16,
                renderer->profile_wall_ms / samples, renderer->profile_stage_ms[0] / samples,
@@ -2936,16 +3397,32 @@ void renderer_destroy(Renderer *renderer) {
     free(renderer->texts);
     free(renderer->font_buffer);
     if (renderer->device) {
+        vkDestroyPipeline(renderer->device, renderer->sprite_occlusion.walls, NULL);
+        vkDestroyPipeline(renderer->device, renderer->sprite_occlusion.merge, NULL);
+        vkDestroyPipelineLayout(renderer->device, renderer->sprite_occlusion.pipeline_layout, NULL);
+        vkDestroyDescriptorPool(renderer->device, renderer->sprite_occlusion.pool, NULL);
+        vkDestroyDescriptorSetLayout(renderer->device, renderer->sprite_occlusion.layout, NULL);
         if (renderer->descriptor_pool) vkDestroyDescriptorPool(renderer->device, renderer->descriptor_pool, NULL);
         if (renderer->hud_pipeline) vkDestroyPipeline(renderer->device, renderer->hud_pipeline, NULL);
         if (renderer->sky_pipeline) vkDestroyPipeline(renderer->device, renderer->sky_pipeline, NULL);
         if (renderer->scene_pipeline) vkDestroyPipeline(renderer->device, renderer->scene_pipeline, NULL);
         if (renderer->pipeline_layout) vkDestroyPipelineLayout(renderer->device, renderer->pipeline_layout, NULL);
         if (renderer->descriptor_layout) vkDestroyDescriptorSetLayout(renderer->device, renderer->descriptor_layout, NULL);
+        if (renderer->reconstruction) {
+            RayReconstruction *rr = renderer->reconstruction;
+            vkDestroyPipeline(renderer->device, rr->pipeline, NULL);
+            vkDestroyPipelineLayout(renderer->device, rr->pipeline_layout, NULL);
+            vkDestroyDescriptorPool(renderer->device, rr->pool, NULL);
+            vkDestroyDescriptorSetLayout(renderer->device, rr->layout, NULL);
+        }
         destroy_ray_lighting(renderer);
         destroy_buffer(renderer, &renderer->vertex_buffer);
+        destroy_buffer(renderer, &renderer->vertex_upload);
+        destroy_buffer(renderer, &renderer->object_buffer);
+        destroy_buffer(renderer, &renderer->object_upload);
         destroy_buffer(renderer, &renderer->uniform_buffer);
         destroy_targets(renderer);
+        free(renderer->reconstruction);
         if (renderer->textures) {
             for (size_t index = 0; index < renderer->texture_count; ++index)
                 destroy_image(renderer, &renderer->textures[index]);
@@ -2974,10 +3451,11 @@ void renderer_destroy(Renderer *renderer) {
     unsigned validation_errors = atomic_load_explicit(&renderer->validation_errors, memory_order_relaxed);
     free(renderer->descriptor_sets);
     free(renderer->batch_offsets);
+    free(renderer->sprite_meshes);
+    free(renderer->objects);
     free(renderer->base_assets);
     free(renderer->vertices);
     free(renderer->previous_scene_positions);
-    free(renderer->previous_sprite_positions);
     free(renderer);
     if (validation_errors) fail("Vulkan validation reported %u error(s)", validation_errors);
 }

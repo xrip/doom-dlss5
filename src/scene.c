@@ -367,8 +367,93 @@ Scene scene_read(const char *path) {
     return scene;
 }
 
+void scene_write_voxels(const Scene *scene, const char *path) {
+    FILE *file = fopen(path, "wb");
+    if (!file) fail("Cannot write %s", path);
+    put_bytes(file, "DRVOX001", 8);
+    put_bytes(file, scene->map, 8);
+    put_u32(file, (uint32_t)scene->asset_count);
+    put_u32(file, (uint32_t)scene->sprite_count);
+    for (size_t index = 0; index < scene->asset_count; ++index) {
+        const Asset *asset = &scene->assets[index];
+        put_bytes(file, asset->name, 8);
+        put_u32(file, (uint32_t)asset->voxel.count);
+        put_float(file, asset->voxel.spin);
+        for (size_t vertex = 0; vertex < asset->voxel.count; ++vertex) {
+            const SceneVertex *point = &asset->voxel.vertices[vertex];
+            put_float(file, point->x); put_float(file, point->y); put_float(file, point->z);
+            put_float(file, point->u); put_float(file, point->v);
+        }
+    }
+    for (size_t index = 0; index < scene->sprite_count; ++index) {
+        put_u32(file, scene->sprites[index].asset);
+        put_float(file, scene->sprites[index].yaw);
+    }
+    if (fclose(file)) fail("Cannot finish %s", path);
+}
+
+void scene_read_voxels(Scene *scene, const char *path) {
+    size_t size;
+    uint8_t *bytes = read_file(path, &size);
+    Reader reader = {.bytes = bytes, .size = size};
+    if (memcmp(take(&reader, 8), "DRVOX001", 8) || memcmp(take(&reader, 8), scene->map, 8) ||
+        get_u32(&reader) != scene->asset_count || get_u32(&reader) != scene->sprite_count)
+        fail("Voxel pack does not match this scene; run wad-convert again");
+    size_t total = 0;
+    for (size_t index = 0; index < scene->asset_count; ++index) {
+        Asset *asset = &scene->assets[index];
+        if (memcmp(take(&reader, 8), asset->name, 8)) fail("Voxel pack asset mismatch");
+        VoxelMesh *mesh = &asset->voxel;
+        mesh->count = get_u32(&reader);
+        mesh->spin = get_float(&reader);
+        if (mesh->count % 3 || mesh->count > 8000000 - total || fabsf(mesh->spin) > 3600)
+            fail("Invalid voxel mesh size or spin");
+        total += mesh->count;
+        require_range(reader.size, reader.offset, mesh->count * 20);
+        mesh->vertices = allocate(mesh->count, sizeof(*mesh->vertices));
+        for (size_t vertex = 0; vertex < mesh->count; ++vertex) {
+            SceneVertex *point = &mesh->vertices[vertex];
+            point->x = get_float(&reader); point->y = get_float(&reader); point->z = get_float(&reader);
+            point->u = get_float(&reader); point->v = get_float(&reader);
+            if (point->u < 0 || point->u > 1 || point->v != 0.5f)
+                fail("Invalid voxel palette coordinates");
+        }
+    }
+    for (size_t index = 0; index < scene->sprite_count; ++index) {
+        if (get_u32(&reader) != scene->sprites[index].asset) fail("Voxel pack sprite mismatch");
+        scene->sprites[index].yaw = get_float(&reader);
+    }
+    if (reader.offset != reader.size) fail("Unexpected trailing voxel data");
+    free(bytes);
+    if (scene->asset_count >= 4096) fail("No texture slot for voxel palette");
+    Asset *assets = realloc(scene->assets, (scene->asset_count + 1) * sizeof(*assets));
+    if (!assets) fail("Out of memory");
+    scene->assets = assets;
+    scene->voxel_asset = (uint32_t)scene->asset_count++;
+    Asset *palette = &scene->assets[scene->voxel_asset];
+    *palette = (Asset){.name = "VOXELPAL", .width = 256, .height = 1,
+        .pixels = allocate(256, 4)};
+    for (unsigned index = 0; index < 256; ++index) {
+        palette->pixels[index * 4] = (uint8_t)index;
+        palette->pixels[index * 4 + 3] = 255;
+    }
+}
+
+const VoxelMesh *scene_sprite_voxel(const Scene *scene, const Sprite *sprite) {
+    if (sprite->asset >= scene->asset_count) return NULL;
+    const VoxelMesh *mesh = &scene->assets[sprite->asset].voxel;
+    if (!mesh->count) return NULL;
+    for (uint32_t frame = 0; frame < sprite->frame_count; ++frame)
+        if (sprite->frames[frame].asset >= scene->asset_count ||
+            !scene->assets[sprite->frames[frame].asset].voxel.count) return NULL;
+    return mesh;
+}
+
 void scene_free(Scene *scene) {
-    for (size_t index = 0; index < scene->asset_count; ++index) free(scene->assets[index].pixels);
+    for (size_t index = 0; index < scene->asset_count; ++index) {
+        free(scene->assets[index].pixels);
+        free(scene->assets[index].voxel.vertices);
+    }
     for (size_t index = 0; index < scene->batch_count; ++index) free(scene->batches[index].vertices);
     free(scene->assets); free(scene->batches); free(scene->sprites);
     free(scene->sectors); free(scene->lines); free(scene->regions);
@@ -379,6 +464,10 @@ void scene_free(Scene *scene) {
 void scene_tick_sprites(Scene *scene) {
     for (size_t index = 0; index < scene->sprite_count; ++index) {
         Sprite *sprite = &scene->sprites[index];
+        if (!sprite->hidden) {
+            const VoxelMesh *mesh = scene_sprite_voxel(scene, sprite);
+            if (mesh) sprite->yaw = remainderf(sprite->yaw - mesh->spin * (0.01745329252f / 35.0f), 6.283185307f);
+        }
         if (!sprite->frame_count || sprite->hidden) continue;
         if (sprite->frame_ticks > 1) {
             --sprite->frame_ticks;
@@ -398,4 +487,13 @@ void scene_print(const Scene *scene) {
     printf("%s: %zu textures, %zu batches, %zu triangles, %zu sprites\n",
            scene->map, scene->asset_count, scene->batch_count, triangles, scene->sprite_count);
     printf("Collision: %zu sectors, %zu lines, %zu regions\n", scene->sector_count, scene->line_count, scene->region_count);
+    size_t models = 0, instances = 0, model_vertices = 0;
+    for (size_t index = 0; index < scene->asset_count; ++index) {
+        models += scene->assets[index].voxel.count != 0;
+        model_vertices += scene->assets[index].voxel.count;
+    }
+    for (size_t index = 0; index < scene->sprite_count; ++index)
+        instances += scene_sprite_voxel(scene, &scene->sprites[index]) != NULL;
+    if (models) printf("Voxels: %zu frame meshes, %zu vertices, %zu/%zu objects replaced\n",
+        models, model_vertices, instances, scene->sprite_count);
 }

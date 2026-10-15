@@ -1,4 +1,4 @@
-param([string]$Exe, [string]$Scene, [string[]]$Modes = @('--dlss5', '--fg'), [string]$Log = 'maximize', [ValidateRange(1, 100)][int]$Cycles = 2)
+param([string]$Exe, [string]$Scene, [string[]]$Modes = @('--dlss5', '--fg'), [string]$Log = 'maximize', [ValidateRange(1, 100)][int]$Cycles = 2, [switch]$ToggleFullscreen, [switch]$AdvanceLevel)
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
@@ -10,6 +10,7 @@ public static class WindowCheck {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr window, int index);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr window, uint message, IntPtr first, IntPtr second);
     public static IntPtr Find(uint process) {
         IntPtr found = IntPtr.Zero;
@@ -23,6 +24,13 @@ public static class WindowCheck {
     }
 }
 '@
+function Send-WindowKey([IntPtr]$Window, [int]$Key, [int]$Scan) {
+    $down = ($Scan -shl 16) -bor 1
+    if (-not [WindowCheck]::PostMessageW($Window, 0x100, [IntPtr]$Key, [IntPtr]$down) -or
+        -not [WindowCheck]::PostMessageW($Window, 0x101, [IntPtr]$Key, [IntPtr]($down -bor -1073741824))) {
+        throw 'Key PostMessage failed'
+    }
+}
 $executable = (Resolve-Path -LiteralPath $Exe).Path
 $scenePath = (Resolve-Path -LiteralPath $Scene).Path
 $arguments = @('"' + $scenePath + '"', '--visible', '--no-music') + $Modes
@@ -42,6 +50,29 @@ try {
     }
     if ($window -eq [IntPtr]::Zero) { throw 'Own game window not found' }
     Start-Sleep -Seconds 4
+    if ($AdvanceLevel) {
+        Send-WindowKey $window 0x45 0x12
+        Start-Sleep -Milliseconds 750
+        Send-WindowKey $window 0x0D 0x1C
+        Start-Sleep -Seconds 2
+        if ($process.HasExited) { throw "Game exited during map change: $($process.ExitCode)" }
+        $window = [WindowCheck]::Find($owner)
+        if ($window -eq [IntPtr]::Zero -or
+            -not (Select-String -LiteralPath "$Log.out.log" -Pattern '^MAP02:' -Quiet)) {
+            throw 'Exit/use/Enter did not load MAP02'
+        }
+        Write-Output 'WAD MAP01 -> MAP02: alive'
+    }
+    if ($ToggleFullscreen) {
+        foreach ($fullscreen in @($true, $false)) {
+            Send-WindowKey $window 0x7B 0x58
+            Start-Sleep -Seconds 2
+            if ($process.HasExited) { throw "Game exited during F12 toggle: $($process.ExitCode)" }
+            $borderless = ([WindowCheck]::GetWindowLongW($window, -16) -band 0x80000000) -ne 0
+            if ($borderless -ne $fullscreen) { throw "F12 fullscreen state did not change to $fullscreen" }
+            Write-Output "F12 fullscreen ${fullscreen}: alive"
+        }
+    }
     foreach ($cycle in 1..$Cycles) {
         foreach ($action in @(@('maximize', 0xF030), @('restore', 0xF120), @('minimize', 0xF020), @('restore', 0xF120))) {
             if (-not [WindowCheck]::PostMessageW($window, 0x112, [IntPtr]$action[1], [IntPtr]::Zero)) { throw 'PostMessage failed' }

@@ -1,5 +1,8 @@
 # Doom II maps
 
+Optional KVX models: add `-Voxels` to the conversion/run scripts.
+See [VOXELS.md](VOXELS.md) for sidecars, fallback, and limits.
+
 These tools prepare and view original Doom II maps MAP01 through MAP32. You
 need a legally obtained original `DOOM2.WAD`; this project does not include
 or download game assets. The WAD is read as input and is never changed.
@@ -14,8 +17,14 @@ Windows SDK, plus the Vulkan SDK with `glslc`. Put Clang on `PATH`, then run:
 $env:PATH = 'C:/Program Files/LLVM/bin;' + $env:PATH
 cmake --preset clang
 cmake --build --preset clang
-ctest --preset clang
+ctest --preset clang -LE ngx
 ```
+
+Do not run NGX GPU batch checks while the known updater-process issue is
+unresolved. Use `--no-ngx` for native runs with the same `build/` binary.
+The `-LE ngx` filter excludes NGX tests. Native all-map tests explicitly
+pass `--no-ngx`. `--inspect` and
+`--prepare-all` do not start GPU or NGX even in the DLSS-enabled build.
 
 The preset puts the executables in `build`. If a script reports a missing
 executable, run these commands; the scripts do not install tools for you.
@@ -24,18 +33,50 @@ dependencies; it does not fetch a game WAD.
 
 ## Convert and run one map
 
-For a build configured with NR support, add `-Dlss5` to `run-map.ps1`.
-F6 toggles neural rendering, F7 changes style, and F8 changes pass count.
-SR stays active when NR is toggled off. Direct engine runs accept
-`--sr off|quality|balanced|performance`; performance is the NR launch default.
+The viewer can now prepare a WAD itself:
+
+```powershell
+./build/doom-raylib.exe ./DOOM2.WAD MAP07
+./build/doom-raylib.exe ./DOOM2.WAD --prepare-all --voxels
+```
+
+Automatic output goes only to `cache/<key>/` beside the viewer, never into
+the WAD folder. The key covers WAD/converter bytes, voxel definition bytes,
+and KVX names, sizes, and modification times. A completion marker is written
+only after conversion succeeds; missing required outputs trigger conversion
+again. Cached levels are reused on launch and on Enter after a level exit.
+`--prepare-all` fills all 32 entries without a window, GPU, or NGX startup.
+
+Keep `wad-convert` beside the viewer. Voxel sources are searched beside the
+viewer and in its two parent folders; WAD mode enables them when all source
+paths exist. `--voxels` requires them; `--no-voxels` disables them. Direct
+`.drmap` runs still use sprites unless `--voxels` is given.
+
+Each cache entry has the `.drmap`, original `.mid` when present, optional
+`.drvox`, and a `.ready` marker. The cache is disposable: close the game
+before deleting it. There is no automatic eviction. KVX edits that preserve
+both file size and modification time require removing the old cache.
+These are local file-cache checks, not a security/content-authentication scheme.
+Inputs are fingerprinted at startup; restart after changing source assets.
+
+The explicit PowerShell/converter workflows below remain available when
+you want to choose an output folder rather than use the automatic cache.
+
+DLSS-enabled builds start in NR+SR mode. F10 selects the separate RR path;
+F6 toggles NR, F7 changes style, and F8 changes pass count in that path.
+SR stays active when NR is toggled off. The scene is always 640x480;
+the window size is the upscale target. Direct runs accept `--no-rr` for
+NR+SR and `--sr off|quality|balanced|performance` for the DLSS model hint.
 See [VULKAN.md](VULKAN.md) for the required SDK/runtime setup.
 With a frame-generation-enabled build, `-FrameGeneration` adds `--fg` and
 also enables `--dlss5`. It preserves the same map conversion and MIDI path.
 `-RayLighting` adds ray-traced direct lighting; it can be combined with
 `-FrameGeneration`. Press `L` in the viewer to compare with classic lighting.
+Use `-Fullscreen` or the engine's `--fullscreen` flag to start fullscreen;
+F12 switches back and forth while preserving the window position and size.
 
 `-Wad` is required. Relative WAD and output paths start at the project
-folder. The default output folder is `build/maps`.
+folder. The explicit scripts default to `build/cache/manual`.
 
 ```powershell
 .\tools\run-map.ps1 -Wad 'C:\Games\Doom II\DOOM2.WAD' -Map MAP02
@@ -69,7 +110,8 @@ To convert a standalone MUS file, use the other converter:
 Or call the WAD converter directly for one scene and sidecar:
 
 ```powershell
-.\build\wad-convert.exe '.\DOOM2.WAD' '.\build\maps\MAP02.drmap' MAP02
+New-Item -ItemType Directory -Force ./build/cache/manual | Out-Null
+.\build\wad-convert.exe '.\DOOM2.WAD' '.\build\cache\manual\MAP02.drmap' MAP02
 ```
 
 ## Controls and scope

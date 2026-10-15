@@ -128,6 +128,192 @@ static void check_billboards(GLFWwindow *window) {
     renderer_destroy(renderer);
 }
 
+typedef struct {
+    size_t red_count, green_count, blue_count;
+    uint32_t min_x, max_x, min_y, max_y;
+} SpritePixels;
+
+static SpritePixels capture_sprite_pixels(Renderer *renderer, Scene *scene, Specials *specials,
+                                           const RenderCamera *camera, const char *message) {
+    renderer_draw(renderer, scene, specials, camera, true);
+    expect_static(renderer, message);
+    uint32_t width, height;
+    const uint8_t *pixels = renderer_pixels(renderer, &width, &height);
+    expect(pixels != NULL, "synthetic sprite fixture returns GPU pixels");
+    SpritePixels result = {.min_x = UINT32_MAX, .min_y = UINT32_MAX};
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint8_t *pixel = pixels + ((size_t)y * width + x) * 4;
+            if (pixel[0] && !pixel[1] && !pixel[2]) {
+                ++result.red_count;
+                if (x < result.min_x) result.min_x = x;
+                if (x > result.max_x) result.max_x = x;
+                if (y < result.min_y) result.min_y = y;
+                if (y > result.max_y) result.max_y = y;
+            } else if (!pixel[0] && pixel[1] && !pixel[2]) {
+                ++result.green_count;
+            } else if (!pixel[0] && !pixel[1] && pixel[2]) {
+                ++result.blue_count;
+            }
+        }
+    }
+    return result;
+}
+
+static bool same_sprite_bounds(SpritePixels first, SpritePixels second) {
+    return first.red_count == second.red_count && first.min_x == second.min_x &&
+           first.max_x == second.max_x && first.min_y == second.min_y && first.max_y == second.max_y;
+}
+
+static void check_sprite_plane_clipping(GLFWwindow *window) {
+    uint8_t frame_a[73 * 65 * 4] = {0}, frame_b[88 * 70 * 4] = {0};
+    for (size_t index = 0; index < 73 * 65; ++index) {
+        frame_a[index * 4] = 1;
+        frame_a[index * 4 + 3] = 255;
+    }
+    for (size_t index = 0; index < 88 * 70; ++index) {
+        frame_b[index * 4] = 1;
+        frame_b[index * 4 + 3] = 255;
+    }
+    uint8_t ceiling_texel[] = {2, 0, 0, 255};
+    uint8_t opaque_wall_texel[] = {3, 0, 0, 255};
+    uint8_t transparent_wall_texel[] = {3, 0, 0, 0};
+    Asset assets[] = {
+        {.name = "SPRITA", .width = 73, .height = 65, .left = 39, .top = 60, .pixels = frame_a},
+        {.name = "SPRITB", .width = 88, .height = 70, .left = 43, .top = 65, .pixels = frame_b},
+        {.name = "CEILING", .width = 1, .height = 1, .pixels = ceiling_texel},
+        {.name = "WALLOPEN", .width = 1, .height = 1, .pixels = opaque_wall_texel},
+        {.name = "WALLCUT", .width = 1, .height = 1, .pixels = transparent_wall_texel}
+    };
+    SceneVertex ceiling[] = {
+        {-4, 0, -4, 0, 0}, {4, 0, 4, 1, 1}, {4, 0, -4, 1, 0},
+        {-4, 0, -4, 0, 0}, {-4, 0, 4, 0, 1}, {4, 0, 4, 1, 1}
+    };
+    SceneVertex wall[] = {
+        {-4, 0, 1, 0, 1}, {4, 4, 1, 1, 0}, {4, 0, 1, 1, 1},
+        {-4, 0, 1, 0, 1}, {-4, 4, 1, 0, 0}, {4, 4, 1, 1, 0}
+    };
+    Batch batches[] = {
+        {.asset = 2, .owner = 0, .plane = SURFACE_CEILING, .count = 6, .vertices = ceiling},
+        {.asset = 4, .plane = SURFACE_WALL, .count = 6, .vertices = wall}
+    };
+    SceneSector sector = {.floor = 0, .ceiling = 2, .light = 255};
+    Sprite sprite = {.asset = 0, .sector = 0, .position = {0, 5.0f / 32.0f, 0},
+        .fullbright = true, .frame_count = 2, .frame_ticks = 15,
+        .frames = {{.asset = 0, .ticks = 15, .fullbright = true},
+                   {.asset = 1, .ticks = 15, .fullbright = true}}};
+    Scene scene = {.asset_count = 5, .assets = assets, .batch_count = 2, .batches = batches,
+                   .sprite_count = 1, .sprites = &sprite, .sector_count = 1, .sectors = &sector};
+    for (unsigned shade = 0; shade < 32; ++shade) {
+        uint8_t *red = &scene.lut[(shade * 256 + 1) * 4];
+        uint8_t *green = &scene.lut[(shade * 256 + 2) * 4];
+        uint8_t *blue = &scene.lut[(shade * 256 + 3) * 4];
+        red[0] = red[3] = 255;
+        green[1] = green[3] = 255;
+        blue[2] = blue[3] = 255;
+    }
+    Specials specials = {0};
+    RenderCamera camera = {.position = {0, 1, 4}, .target = {0, 1, 0}, .fovy = 70};
+    Renderer *renderer = renderer_create(window, &scene,
+        (RendererOptions){.validation = true, .no_vsync = true});
+
+    scene.batch_count = 1;
+    sector.ceiling = sector.floor;
+    SpritePixels frame_a_reference = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "sprite reference has valid static motion data");
+    sector.ceiling = 2;
+    SpritePixels frame_a_ceiling = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "ceiling comparison has valid static motion data");
+    expect(frame_a_reference.red_count > 0, "synthetic frame A is visible without a ceiling");
+    expect(frame_a_ceiling.green_count > 0, "synthetic ceiling is visible in green");
+    expect(same_sprite_bounds(frame_a_reference, frame_a_ceiling),
+           "ceiling preserves frame A red pixel bounds and count");
+
+    scene.batch_count = 2;
+    batches[1].asset = 4;
+    SpritePixels frame_a_cutout_wall = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "transparent wall comparison has valid static motion data");
+    expect(same_sprite_bounds(frame_a_ceiling, frame_a_cutout_wall),
+           "transparent wall texels do not hide frame A");
+    batches[1].asset = 3;
+    SpritePixels frame_a_opaque_wall = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "opaque wall comparison has valid static motion data");
+    expect(frame_a_opaque_wall.red_count == 0 && frame_a_opaque_wall.blue_count > 0,
+           "opaque wall hides frame A behind the ceiling");
+
+    for (unsigned tick = 0; tick < 15; ++tick) scene_tick_sprites(&scene);
+    expect(sprite.frame_index == 1 && sprite.asset == 1, "15 ticks select Mancubus frame B");
+    sector.ceiling = sector.floor;
+    scene.batch_count = 1;
+    SpritePixels frame_b_reference = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "frame B reference has valid static motion data");
+    sector.ceiling = 2;
+    SpritePixels frame_b_ceiling = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "frame B ceiling comparison has valid static motion data");
+    expect(frame_b_reference.red_count > 0, "synthetic frame B is visible without a ceiling");
+    expect(frame_b_ceiling.green_count > 0, "synthetic ceiling remains visible for frame B");
+    expect(same_sprite_bounds(frame_b_reference, frame_b_ceiling),
+           "ceiling preserves frame B red pixel bounds and count");
+    expect(frame_b_reference.red_count > frame_a_reference.red_count &&
+           frame_b_reference.max_x - frame_b_reference.min_x > frame_a_reference.max_x - frame_a_reference.min_x &&
+           frame_b_reference.max_y - frame_b_reference.min_y > frame_a_reference.max_y - frame_a_reference.min_y &&
+           frame_b_reference.min_y < frame_a_reference.min_y,
+           "frame B grows and extends above frame A");
+
+    scene.batch_count = 2;
+    batches[1].asset = 4;
+    SpritePixels frame_b_cutout_wall = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "frame B transparent wall comparison has valid static motion data");
+    expect(same_sprite_bounds(frame_b_ceiling, frame_b_cutout_wall),
+           "transparent wall texels do not hide frame B");
+    batches[1].asset = 3;
+    SpritePixels frame_b_opaque_wall = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "frame B opaque wall comparison has valid static motion data");
+    expect(frame_b_opaque_wall.red_count == 0 && frame_b_opaque_wall.blue_count > 0,
+           "opaque wall hides frame B behind the ceiling");
+
+    renderer_destroy(renderer);
+    scene.batch_count = 1;
+    sector.ceiling = 65.0f / 32;
+    sprite.asset = sprite.frame_index = 0;
+    sprite.frame_ticks = 15;
+    renderer = renderer_create(window, &scene, (RendererOptions){.validation = true, .no_vsync = true});
+    for (unsigned phase = 0; phase < 4; ++phase) {
+        SpritePixels pixels = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+            "switching sprite depth paths preserves static motion data");
+        expect(same_sprite_bounds(pixels, sprite.frame_index ? frame_b_reference : frame_a_reference),
+               "animation can enter and leave ceiling overflow without clipping");
+        for (unsigned tick = 0; tick < 15; ++tick) scene_tick_sprites(&scene);
+    }
+    renderer_destroy(renderer);
+
+    SceneSector regression_sectors[] = {
+        {.floor = 0, .ceiling = 2, .light = 255},
+        {.floor = -4, .ceiling = 2, .light = 255}
+    };
+    Sprite regression_sprites[] = {
+        {.asset = 0, .sector = 1, .position = {0, -2.5f, 0}, .fullbright = true},
+        {.asset = 1, .sector = 0, .position = {50, 5.0f / 32.0f, 0}, .fullbright = true, .hidden = true}
+    };
+    scene.sectors = regression_sectors;
+    scene.sector_count = 2;
+    scene.sprites = regression_sprites;
+    scene.sprite_count = 2;
+    scene.batch_count = 1;
+    batches[0].plane = SURFACE_FLOOR;
+    renderer = renderer_create(window, &scene, (RendererOptions){.validation = true, .no_vsync = true});
+    SpritePixels hidden_sprite = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "normal sprite behind floor has valid static motion data");
+    expect(hidden_sprite.red_count == 0 && hidden_sprite.green_count > 0,
+           "floor hides a normal sprite within its own sector planes");
+    regression_sprites[1].hidden = false;
+    SpritePixels hidden_with_overflow = capture_sprite_pixels(renderer, &scene, &specials, &camera,
+        "offscreen overflow comparison has valid static motion data");
+    expect(hidden_with_overflow.red_count == 0,
+           "offscreen overflowing sprite does not reveal a normal sprite behind the floor");
+    renderer_destroy(renderer);
+}
+
 static unsigned shadow_sample(Renderer *renderer, Scene *scene, Specials *specials, const RenderCamera *camera) {
     renderer_draw(renderer, scene, specials, camera, false);
     uint32_t width, height;
@@ -139,10 +325,17 @@ static unsigned shadow_sample(Renderer *renderer, Scene *scene, Specials *specia
 
 static void check_ray_shadows(GLFWwindow *window) {
     uint8_t opaque[] = {1, 0, 0, 255}, transparent[] = {1, 0, 0, 0};
+    uint8_t sprite_texels[128 * 96 * 4] = {0}, sprite_cutout[128 * 96 * 4] = {0};
+    for (size_t index = 0; index < 128 * 96; ++index) {
+        sprite_texels[index * 4] = 1;
+        sprite_texels[index * 4 + 3] = 255;
+    }
     Asset assets[] = {
         {.name = "FLOOR", .width = 1, .height = 1, .pixels = opaque},
         {.name = "WALL", .width = 1, .height = 1, .pixels = opaque},
-        {.name = "CUTOUT", .width = 1, .height = 1, .pixels = transparent}};
+        {.name = "CUTOUT", .width = 1, .height = 1, .pixels = transparent},
+        {.name = "MOB", .width = 128, .height = 96, .left = 64, .top = 96, .pixels = sprite_texels},
+        {.name = "MOB2", .width = 128, .height = 96, .left = 64, .top = 96, .pixels = sprite_cutout}};
     SceneVertex floor[] = {{-4, 0, -4, 0, 0}, {4, 0, 4, 1, 1}, {4, 0, -4, 1, 0},
                           {-4, 0, -4, 0, 0}, {-4, 0, 4, 0, 1}, {4, 0, 4, 1, 1}};
     SceneVertex wall[] = {{0, 0, -2, 0, 0}, {0, 3, 2, 1, 1}, {0, 0, 2, 1, 0},
@@ -150,7 +343,7 @@ static void check_ray_shadows(GLFWwindow *window) {
     Batch batches[] = {{.asset = 0, .plane = SURFACE_FLOOR, .count = 6, .vertices = floor},
                        {.asset = 1, .plane = SURFACE_WALL, .count = 6, .vertices = wall}};
     SceneSector sector = {.floor = 0, .ceiling = 4, .light = 255};
-    Scene scene = {.map = "RAYTEST", .asset_count = 3, .assets = assets, .batch_count = 2,
+    Scene scene = {.map = "RAYTEST", .asset_count = 5, .assets = assets, .batch_count = 2,
         .batches = batches, .sector_count = 1, .sectors = &sector};
     for (unsigned shade = 0; shade < 32; ++shade) {
         uint8_t *color = &scene.lut[(shade * 256 + 1) * 4];
@@ -179,22 +372,220 @@ static void check_ray_shadows(GLFWwindow *window) {
     printf("Ray shadow samples: solid=%u moved=%u restored=%u transparent=%u classic=%u\n",
            shadowed, moved, restored, cutout, classic);
     renderer_destroy(renderer);
+    Sprite sprite = {.asset = 3, .frame_count = 2,
+        .frames = {{.asset = 3, .ticks = 1}, {.asset = 4, .ticks = 1}}};
+    scene.sprites = &sprite;
+    scene.sprite_count = 1;
+    scene.batch_count = 1;
+    renderer = renderer_create(window, &scene, options);
+    unsigned sprite_shadow = shadow_sample(renderer, &scene, &specials, &camera);
+    sprite.position.x = 10;
+    unsigned sprite_moved = shadow_sample(renderer, &scene, &specials, &camera);
+    expect(sprite_moved > sprite_shadow + 20, "moving a sprite updates its ray shadow");
+    sprite.position.x = 0;
+    sprite.hidden = true;
+    unsigned sprite_hidden = shadow_sample(renderer, &scene, &specials, &camera);
+    expect(abs((int)sprite_hidden - (int)sprite_moved) <= 2, "hidden sprites cast no ray shadow");
+    sprite.hidden = false;
+    sprite.asset = 4;
+    unsigned sprite_transparent = shadow_sample(renderer, &scene, &specials, &camera);
+    expect(abs((int)sprite_transparent - (int)sprite_moved) <= 2, "animated sprite alpha controls ray shadows");
+    renderer_destroy(renderer);
+    SceneVertex voxel_vertices[18];
+    for (unsigned vertex = 0; vertex < 18; ++vertex) {
+        voxel_vertices[vertex] = vertex < 12 ? wall[vertex % 6] : floor[vertex - 12];
+        if (vertex >= 6 && vertex < 12) voxel_vertices[vertex].x -= 0.5f;
+        voxel_vertices[vertex].u = voxel_vertices[vertex].v = 0.5f;
+    }
+    assets[4].voxel = (VoxelMesh){.count = 18, .vertices = voxel_vertices};
+    assets[3].voxel = (VoxelMesh){.count = 6, .vertices = voxel_vertices};
+    scene.voxel_asset = 0;
+    sprite.position.y = -10;
+    renderer = renderer_create(window, &scene, options);
+    unsigned model_shadow = shadow_sample(renderer, &scene, &specials, &camera);
+    shadow_sample(renderer, &scene, &specials, &camera);
+    expect_static(renderer, "cached static voxel mesh has no stale motion");
+    sprite.position.x = 0.25f;
+    shadow_sample(renderer, &scene, &specials, &camera);
+    expect_motion(renderer, "moving a voxel mesh produces object motion");
+    shadow_sample(renderer, &scene, &specials, &camera);
+    expect_static(renderer, "stopping a voxel mesh clears motion on the next frame");
+    shadow_sample(renderer, &scene, &specials, &camera);
+    expect_static(renderer, "cached stopped voxel mesh keeps zero motion");
+    sprite.position.x = 10;
+    unsigned model_moved = shadow_sample(renderer, &scene, &specials, &camera);
+    expect(model_moved > model_shadow + 20,
+        "voxel meshes self-shadow with opaque materials and floor anchors, not sprite alpha or baseline");
+    sprite.position.x = 0;
+    sprite.hidden = true;
+    unsigned model_hidden = shadow_sample(renderer, &scene, &specials, &camera);
+    expect(abs((int)model_hidden - (int)model_moved) <= 2, "hidden voxel meshes cast no shadow");
+    sprite.hidden = false;
+    sprite.asset = 3;
+    unsigned smaller_model = shadow_sample(renderer, &scene, &specials, &camera);
+    expect(smaller_model + 20 < model_moved, "smaller animated meshes select their shared pose");
+    for (unsigned phase = 0; phase < 12; ++phase) {
+        sprite.asset = phase % 2 ? 3 : 4;
+        sprite.hidden = phase % 3 == 0;
+        unsigned sample = shadow_sample(renderer, &scene, &specials, &camera);
+        expect(sprite.hidden ? abs((int)sample - (int)model_moved) <= 2 : sample + 20 < model_moved,
+            "shared pose and hidden-instance changes keep correct shadows across repeated cycles");
+    }
+    renderer_destroy(renderer);
+    assets[3].voxel = (VoxelMesh){0};
+    assets[4].voxel = (VoxelMesh){0};
+    sprite.position.y = 0;
+    sprite.asset = 4;
+    uint8_t lamp_texel[] = {2, 0, 0, 255};
+    assets[4] = (Asset){.name = "TLMPA0", .width = 1, .height = 1, .top = 48, .pixels = lamp_texel};
+    for (unsigned shade = 0; shade < 32; ++shade) {
+        uint8_t *blue = &scene.lut[(shade * 256 + 2) * 4];
+        blue[2] = 255; blue[3] = 255;
+    }
+    sprite.fullbright = true;
+    renderer = renderer_create(window, &scene, options);
+    shadow_sample(renderer, &scene, &specials, &camera);
+    uint32_t width, height;
+    const uint8_t *pixels = renderer_pixels(renderer, &width, &height);
+    uint32_t column = (uint32_t)lroundf((float)width * 0.5f + (float)height * 0.5f /
+                                      (16.0f * tanf(35.0f * 3.14159265358979323846f / 180.0f)));
+    size_t sample = ((size_t)(height / 2) * width + column) * 4;
+    expect(pixels[sample + 2] > pixels[sample] + 8, "sprite light casts its palette color onto the floor");
+    unsigned lit_blue = pixels[sample + 2];
+    sprite.hidden = true;
+    shadow_sample(renderer, &scene, &specials, &camera);
+    pixels = renderer_pixels(renderer, &width, &height);
+    expect(lit_blue > pixels[sample + 2] + 8, "hiding an emitter removes its colored light");
+    renderer_destroy(renderer);
     specials_free(&specials);
 }
 
+static void check_reconstruction(GLFWwindow *window, Scene *scene, Specials *specials, bool frame_generation) {
+    RenderCamera camera = {.position = scene->spawn,
+        .target = {scene->spawn.x + cosf(scene->yaw), scene->spawn.y, scene->spawn.z - sinf(scene->yaw)}, .fovy = 70};
+    Renderer *renderer = renderer_create(window, scene, (RendererOptions){.validation = true,
+        .dlss_enabled = true, .frame_generation = frame_generation, .ray_lighting = true,
+        .ray_reconstruction = true, .upscale_mode = 3, .no_vsync = true});
+    renderer_set_neural(renderer, false);
+    for (unsigned frame = 0; frame < 16; ++frame) renderer_draw(renderer, scene, specials, &camera, frame == 0);
+    uint32_t width, height;
+    const uint8_t *pixels = renderer_pixels(renderer, &width, &height);
+    size_t bytes = (size_t)width * height * 4;
+    uint8_t *reference = allocate(bytes, 1);
+    memcpy(reference, pixels, bytes);
+    expect(renderer_set_ray_reconstruction(renderer, false), "RR can be disabled live");
+    for (unsigned frame = 0; frame < 16; ++frame) renderer_draw(renderer, scene, specials, &camera, false);
+    pixels = renderer_pixels(renderer, &width, &height);
+    double difference = pixel_difference(reference, pixels, bytes);
+    expect(difference > 0.01, "RR and unreconstructed lighting produce different GPU images");
+    free(reference);
+    expect(renderer_set_ray_reconstruction(renderer, true), "RR can resume live");
+    for (unsigned mode = 0; mode <= 3; ++mode) {
+        expect(renderer_set_upscale_mode(renderer, mode), "RR supports DLAA and all SR quality modes");
+        renderer_draw(renderer, scene, specials, &camera, true);
+        expect_static(renderer, "RR quality change resets motion history");
+        for (unsigned frame = 1; frame < 32; ++frame) renderer_draw(renderer, scene, specials, &camera, false);
+        pixels = renderer_pixels(renderer, &width, &height);
+        bytes = (size_t)width * height * 4;
+        reference = allocate(bytes, 1);
+        memcpy(reference, pixels, bytes);
+        renderer_set_neural(renderer, true);
+        renderer_set_neural_passes(renderer, 2);
+        for (unsigned frame = 0; frame < 32; ++frame) renderer_draw(renderer, scene, specials, &camera, frame == 0);
+        pixels = renderer_pixels(renderer, &width, &height);
+        double preference_difference = pixel_difference(reference, pixels, bytes);
+        printf("RR mode %u: NR preference replay difference %.3f\n", mode, preference_difference);
+        expect(preference_difference < 1.0, "NR is not stacked onto the RR mode");
+        free(reference);
+        camera.position.x += 0.1f; camera.target.x += 0.1f;
+        renderer_draw(renderer, scene, specials, &camera, false);
+        expect_motion(renderer, "RR camera motion is preserved for reconstruction and FG");
+        renderer_set_neural(renderer, false);
+    }
+    renderer_set_ray_lighting(renderer, false);
+    renderer_draw(renderer, scene, specials, &camera, false);
+    renderer_set_ray_lighting(renderer, true);
+    renderer_set_ray_reconstruction(renderer, false);
+    renderer_set_neural(renderer, true);
+    renderer_draw(renderer, scene, specials, &camera, true);
+    renderer_set_ray_reconstruction(renderer, true);
+    glfwSetWindowSize(window, 800, 600);
+    glfwPollEvents();
+    renderer_draw(renderer, scene, specials, &camera, false);
+    pixels = renderer_pixels(renderer, &width, &height);
+    expect(pixels && width == 800 && height == 600, "RR output follows window resize");
+    printf("Ray Reconstruction comparison: %.3f average pixel difference\n", difference);
+    renderer_destroy(renderer);
+}
+
+static int compare_times(const void *first, const void *second) {
+    double left = *(const double *)first, right = *(const double *)second;
+    return (left > right) - (left < right);
+}
+
+static void benchmark_motion(GLFWwindow *window, Scene *scene, Specials *specials, bool ray_lighting,
+                             unsigned frames, bool validation) {
+    Renderer *renderer = renderer_create(window, scene,
+        (RendererOptions){.ray_lighting = ray_lighting, .no_vsync = true, .validation = validation});
+    renderer_enable_profile(renderer);
+    unsigned count = frames - 16;
+    double *samples = allocate(count, sizeof(*samples)), total = 0;
+    RenderCamera camera = {.position = scene->spawn, .fovy = 70};
+    for (unsigned frame = 0; frame < frames; ++frame) {
+        if (frame % 4 == 0) scene_tick_sprites(scene);
+        float yaw = scene->yaw + sinf((float)frame * 0.04f) * 0.4f;
+        camera.position.x = scene->spawn.x + sinf((float)frame * 0.02f) * 0.2f;
+        camera.target = (Position){camera.position.x + cosf(yaw), camera.position.y,
+            camera.position.z - sinf(yaw)};
+        double start = glfwGetTime();
+        renderer_draw(renderer, scene, specials, &camera, frame == 0);
+        if (frame >= 16) {
+            double elapsed = (glfwGetTime() - start) * 1000;
+            samples[frame - 16] = elapsed;
+            total += elapsed;
+        }
+    }
+    qsort(samples, count, sizeof(*samples), compare_times);
+    printf("Dynamic %s frames=%u ray=%u: mean=%.3fms p95=%.3fms max=%.3fms\n", scene->map,
+        frames, (unsigned)ray_lighting, total / count, samples[count * 95 / 100], samples[count - 1]);
+    free(samples);
+    renderer_destroy(renderer);
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2) fail("Usage: check-renderer MAP01.drmap [--dlss5] [--fg] [--ray-lighting]");
-    bool neural = false, frame_generation = false, ray_lighting = false;
+    if (argc < 2) fail("Usage: check-renderer SCENE.drmap [--voxels] [--benchmark [FRAMES]] [--validation] [--dlss5] [--fg] [--ray-lighting]");
+    bool neural = false, frame_generation = false, ray_lighting = false, reconstruction = false;
+    bool benchmark = false, voxels = false;
+    bool benchmark_validation = false;
+    unsigned benchmark_frames = 128;
     for (int index = 2; index < argc; ++index) {
         if (!strcmp(argv[index], "--dlss5")) neural = true;
         else if (!strcmp(argv[index], "--fg")) frame_generation = true;
         else if (!strcmp(argv[index], "--ray-lighting")) ray_lighting = true;
+        else if (!strcmp(argv[index], "--rr")) reconstruction = true;
+        else if (!strcmp(argv[index], "--benchmark")) {
+            benchmark = true;
+            if (index + 1 < argc && argv[index + 1][0] >= '0' && argv[index + 1][0] <= '9') {
+                char *end;
+                unsigned long frames = strtoul(argv[++index], &end, 10);
+                if (*end || frames < 17 || frames > 4096) fail("Benchmark frames must be 17..4096");
+                benchmark_frames = (unsigned)frames;
+            }
+        }
+        else if (!strcmp(argv[index], "--validation")) benchmark_validation = true;
+        else if (!strcmp(argv[index], "--voxels")) voxels = true;
         else fail("Unknown renderer test option: %s", argv[index]);
     }
     expect(!frame_generation || neural, "FG test requires neural mode");
+    expect(!benchmark || (!neural && !frame_generation && !reconstruction), "motion benchmark is native-only");
 
     Scene scene = scene_read(argv[1]);
-    expect(strcmp(scene.map, "MAP01") == 0, "input scene is MAP01");
+    if (voxels) {
+        char *path = scene_sidecar(argv[1], ".drvox");
+        scene_read_voxels(&scene, path);
+        free(path);
+    }
+    expect(benchmark || strcmp(scene.map, "MAP01") == 0, "input scene is MAP01");
     Specials specials = specials_create(&scene);
 
     expect(glfwInit() == GLFW_TRUE, "GLFW initializes");
@@ -202,6 +593,23 @@ int main(int argc, char **argv) {
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     GLFWwindow *window = glfwCreateWindow(640, 360, "renderer-check", NULL, NULL);
     expect(window != NULL, "hidden Vulkan window is created");
+
+    if (benchmark) {
+        benchmark_motion(window, &scene, &specials, ray_lighting, benchmark_frames, benchmark_validation);
+        glfwDestroyWindow(window); glfwTerminate();
+        specials_free(&specials); scene_free(&scene);
+        return 0;
+    }
+
+    if (reconstruction) {
+        check_reconstruction(window, &scene, &specials, frame_generation);
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        specials_free(&specials);
+        scene_free(&scene);
+        puts("Passed separate DLSS RR/NR modes, motion, quality, and resize checks");
+        return 0;
+    }
 
     Renderer *renderer = renderer_create(window, &scene, (RendererOptions){.validation = true,
         .dlss_enabled = neural, .frame_generation = frame_generation, .ray_lighting = ray_lighting,
@@ -375,6 +783,7 @@ int main(int argc, char **argv) {
     expect_static(renderer, "sky rotation history resets");
     renderer_destroy(renderer);
     check_billboards(window);
+    check_sprite_plane_clipping(window);
     if (neural) {
         for (unsigned mode = 1; mode <= 3; ++mode) {
             glfwSetWindowSize(window, 640, 360);

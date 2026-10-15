@@ -27,10 +27,15 @@ function Get-LevelPaths([string]$Wad, [string]$OutputDirectory, [switch]$NeedVie
     return [pscustomobject]@{Wad = $wadPath; Output = $outputPath; Converter = $converter; Viewer = $viewer}
 }
 
-function Convert-Level($Paths, [string]$Map) {
+function Convert-Level($Paths, [string]$Map, [switch]$Voxels) {
     $scenePath = Join-Path $Paths.Output "$Map.drmap"
     $musicPath = Join-Path $Paths.Output "$Map.mid"
-    & $Paths.Converter $Paths.Wad $scenePath $Map | Out-Host
+    $arguments = @($Paths.Wad, $scenePath, $Map)
+    if ($Voxels) {
+        $arguments += @('--voxels', (Resolve-LevelPath 'voxels'),
+            '--voxeldef', (Resolve-LevelPath 'VOXELDEF1.txt'), '--voxeldef', (Resolve-LevelPath 'voxeldef.txt'))
+    }
+    & $Paths.Converter @arguments | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "wad-convert failed for $Map with exit code $LASTEXITCODE"
     }
@@ -38,6 +43,9 @@ function Convert-Level($Paths, [string]$Map) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
             throw "wad-convert did not write $file"
         }
+    }
+    if ($Voxels -and -not (Test-Path -LiteralPath (Join-Path $Paths.Output "$Map.drvox") -PathType Leaf)) {
+        throw "wad-convert did not write $Map.drvox"
     }
     return $scenePath
 }

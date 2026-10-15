@@ -1,8 +1,11 @@
 /build*/
+/cache/
 *.wad
 *.WAD
 *.drmap
 *.DRMAP
+*.drvox
+*.DRVOX
 *.mid
 *.MID
 *.mus

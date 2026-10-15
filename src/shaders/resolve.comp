@@ -1,0 +1,14 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "color.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba16f) readonly uniform image2D inputImage;
+layout(set = 0, binding = 1, rgba8) writeonly uniform image2D outputImage;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(outputImage)))) return;
+    vec3 radiance = clamp(imageLoad(inputImage, pixel).rgb, 0.0, 1.0);
+    imageStore(outputImage, pixel, vec4(encodePaletteSrgb(radiance), 1.0));
+}
