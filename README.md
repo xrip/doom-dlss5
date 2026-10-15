@@ -8,7 +8,7 @@ only the prepared scene: it has no WAD parser or tessellator.
 <p align="center">
   <a href="https://www.youtube.com/watch?v=mFpq7nEeMTU">
     <img
-      src="https://img.youtube.com/vi/mFpq7nEeMTU/hqdefault.jpg"
+      src="https://img.youtube.com/vi/mFpq7nEeMTU/maxresdefault.jpg"
       alt="MAP07: Doom 2 Vulkan + DLSS5 render rewrite"
       width="640"
     />
